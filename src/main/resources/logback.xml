@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- ALL logging MUST go to stderr. stdout is reserved for MCP JSON-RPC protocol. -->
+    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Suppress noisy jadx logs -->
+    <logger name="jadx" level="WARN"/>
+    <logger name="jadx.core" level="WARN"/>
+    <logger name="jadx.plugins" level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="STDERR"/>
+    </root>
+</configuration>
