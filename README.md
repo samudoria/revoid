@@ -1,14 +1,16 @@
-# Revoid:JADX Headless MCP Server
+# Revoid: JADX Headless MCP Server
 
-Revoid is a fully headless, analysis-first Model Context Protocol (MCP) server for Android reverse engineering, built on top of `jadx-core`.
+Revoid is a fully headless, analysis-first Model Context Protocol (MCP) server for Android reverse engineering, built on top of `jadx-core`. It is the companion MCP server for [JADX Native](https://github.com/samudoria/jadx_native).
 
-Unlike UI-based decompiler tools, this server is designed specifically for Large Language Models (LLMs) to programmatically analyze, query, and navigate APK and DEX files deterministically. It behaves like a program analysis database interface.
+Unlike UI-based decompiler tools, this server is designed specifically for Large Language Models (LLMs) to programmatically analyze, query, and navigate APK, DEX, and native `.so` files deterministically. It behaves like a program analysis database interface.
 
 ## Features
 
 - **Headless-First**: Uses the `jadx-core` library directly for high-performance, headless decompilation.
+- **Native Library Analysis**: Integrates with Ghidra's headless analyzer to extract, decompile, and disassemble native `.so` functions.
 - **In-Memory Indexing**: Automatically builds indexes for classes, methods, and strings upon loading an APK.
 - **Call Graph Analysis**: Computes forward and reverse execution paths (callers and callees) programmatically from bytecode `INVOKE` instructions.
+- **Context-Window Optimized**: All list APIs (classes, methods, strings, native functions) are paginated to prevent LLM context bloat.
 - **Deterministic**: Provides consistent results without relying on GUI state, selected text, or HTTP bridges.
 
 ## Tech Stack
@@ -78,13 +80,23 @@ Make sure to replace `/path/to/...` with the absolute path to the generated JAR 
 | `xrefs_to_class` | Find all cross-references (usages) to a specific class. |
 | `xrefs_to_method` | Find all cross-references (callers/usages) to a specific method. |
 | `xrefs_to_field` | Find all cross-references (reads/writes) to a specific field. |
-| `get_android_manifest` | Retrieve the decoded `AndroidManifest.xml` content. |
-| `get_manifest_component` | Extract specific components (e.g. `<activity>`, `<service>`) from the manifest. |
+| `get_manifest_activities` | Extract all `<activity>` tags from the manifest. |
+| `get_manifest_services` | Extract all `<service>` tags from the manifest. |
+| `get_manifest_receivers` | Extract all `<receiver>` tags from the manifest. |
+| `get_manifest_providers` | Extract all `<provider>` tags from the manifest. |
+| `get_manifest_permissions` | Extract all `<uses-permission>` tags from the manifest. |
+| `get_manifest_exported_components` | Extract all explicitly exported components from the manifest. |
 | `get_main_activity_class` | Identify the launchable Main Activity from `AndroidManifest.xml`. |
 | `get_main_application_classes_names` | List all classes belonging to the app's base package. |
-| `get_strings` | Retrieve and decode the `res/values/strings.xml` file. |
-| `get_all_resource_file_names` | Retrieve a list of all resource file names inside the APK. |
+| `get_resource_strings` | Paginated retrieval of key-value pairs from `res/values/strings.xml`. |
+| `get_all_resource_file_names` | Retrieve a paginated list of all resource file names inside the APK. |
 | `get_resource_file` | Retrieve the decoded content of a specific resource file. |
+| `analyze_native_library` | Run Ghidra headless analysis on a specific `.so` file. |
+| `list_native_functions` | Paginated list of all functions in a native library. |
+| `get_native_function` | Get the decompiled C/C++ source code and disassembly of a native function. |
+| `list_native_strings` | Paginated list of all strings in a native library. |
+| `list_native_imports` | Paginated list of all imports in a native library. |
+| `list_native_exports` | Paginated list of all exports in a native library. |
 
 ## Logging
 
