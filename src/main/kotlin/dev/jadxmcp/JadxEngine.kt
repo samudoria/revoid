@@ -23,7 +23,7 @@ class JadxEngine {
 
     // Active decompiler instance
     private var decompiler: JadxDecompiler? = null
-    private var currentApkPath: String? = null
+    var currentApkPath: String? = null
     private var currentApkId: String? = null
 
     // ── Indexes ──────────────────────────────────────────────
@@ -92,11 +92,12 @@ class JadxEngine {
     /**
      * List all class names, optionally filtered by a package prefix.
      */
-    fun listClasses(filter: String? = null): List<String> {
+    fun listClasses(filter: String? = null, limit: Int = 50, offset: Int = 0): PaginatedClasses {
         ensureLoaded()
         val names = classIndex.keys.sorted()
-        if (filter.isNullOrBlank()) return names
-        return names.filter { it.startsWith(filter, ignoreCase = true) }
+        val filtered = if (filter.isNullOrBlank()) names else names.filter { it.startsWith(filter, ignoreCase = true) }
+        val paged = filtered.drop(offset).take(limit)
+        return PaginatedClasses(paged, filtered.size, limit, offset)
     }
 
     /**
@@ -111,10 +112,10 @@ class JadxEngine {
     /**
      * List methods in a class with their metadata.
      */
-    fun listMethods(className: String): List<MethodInfo> {
+    fun listMethods(className: String, limit: Int = 50, offset: Int = 0): PaginatedMethods {
         ensureLoaded()
         val cls = findClass(className)
-        return cls.methods.map { method ->
+        val methods = cls.methods.map { method ->
             MethodInfo(
                 name = method.name,
                 fullSignature = getMethodSignature(method),
@@ -123,6 +124,8 @@ class JadxEngine {
                 accessFlags = formatAccessFlags(method),
             )
         }
+        val paged = methods.drop(offset).take(limit)
+        return PaginatedMethods(paged, methods.size, limit, offset)
     }
 
     /**
@@ -171,7 +174,7 @@ class JadxEngine {
     /**
      * Search string constants across all decompiled classes.
      */
-    fun searchStrings(query: String): List<StringMatch> {
+    fun searchStrings(query: String, limit: Int = 50, offset: Int = 0): PaginatedStringMatches {
         ensureLoaded()
         val results = mutableListOf<StringMatch>()
         val lowerQuery = query.lowercase()
@@ -201,7 +204,8 @@ class JadxEngine {
             }
         }
 
-        return results
+        val paged = results.drop(offset).take(limit)
+        return PaginatedStringMatches(paged, results.size, limit, offset)
     }
 
     /**
@@ -229,9 +233,11 @@ class JadxEngine {
 
     // ── Resources & Manifest ─────────────────────────────────
 
-    fun getAllResourceFileNames(): List<String> {
+    fun getAllResourceFileNames(limit: Int = 50, offset: Int = 0): PaginatedStrings {
         ensureLoaded()
-        return decompiler?.resources?.map { it.originalName } ?: emptyList()
+        val names = decompiler?.resources?.map { it.originalName } ?: emptyList()
+        val paged = names.drop(offset).take(limit)
+        return PaginatedStrings(paged, names.size, limit, offset)
     }
 
     fun getResourceFile(name: String): String {
@@ -242,14 +248,25 @@ class JadxEngine {
         return content.text?.codeStr ?: "// Resource could not be decoded as text."
     }
 
-    fun getStrings(): String {
+    fun getResourceStrings(limit: Int = 50, offset: Int = 0): PaginatedResourceStrings {
         ensureLoaded()
         val res = decompiler?.resources?.find { it.originalName.endsWith("res/values/strings.xml") }
             ?: throw IllegalArgumentException("strings.xml not found. Are resources parsed?")
-        return res.loadContent().text?.codeStr ?: "// Failed to decode strings.xml"
+        
+        val xml = res.loadContent().text?.codeStr ?: return PaginatedResourceStrings(emptyList(), 0, limit, offset)
+        
+        val results = mutableListOf<ResourceString>()
+        val pattern = Regex("<string\\s+name=\"([^\"]+)\"[^>]*>(.*?)</string>", RegexOption.DOT_MATCHES_ALL)
+        
+        pattern.findAll(xml).forEach { match ->
+            results.add(ResourceString(match.groupValues[1], match.groupValues[2]))
+        }
+        
+        val paged = results.drop(offset).take(limit)
+        return PaginatedResourceStrings(paged, results.size, limit, offset)
     }
 
-    fun getAndroidManifest(): String {
+    private fun getAndroidManifest(): String {
         ensureLoaded()
         val res = decompiler?.resources?.find { it.originalName == "AndroidManifest.xml" }
             ?: throw IllegalArgumentException("AndroidManifest.xml not found")
@@ -272,6 +289,29 @@ class JadxEngine {
 
         pattern.findAll(xml).forEach { extractAttributes(it.groupValues[1], it.value) }
         selfClosingPattern.findAll(xml).forEach { extractAttributes(it.groupValues[1], it.value) }
+        return results
+    }
+
+    fun getManifestPermissions(): List<String> {
+        val xml = getAndroidManifest()
+        val results = mutableListOf<String>()
+        val selfClosingPattern = Regex("<uses-permission\\b([^>]*)/>")
+        
+        selfClosingPattern.findAll(xml).forEach { match ->
+            val attrs = match.groupValues[1]
+            val nameMatch = Regex("android:name=\"([^\"]+)\"").find(attrs)
+            if (nameMatch != null) {
+                results.add(nameMatch.groupValues[1])
+            }
+        }
+        return results
+    }
+
+    fun getManifestExportedComponents(): List<ManifestComponent> {
+        val results = mutableListOf<ManifestComponent>()
+        listOf("activity", "service", "receiver", "provider").forEach { componentType ->
+            getManifestComponent(componentType).filter { it.exported == true }.forEach { results.add(it) }
+        }
         return results
     }
 

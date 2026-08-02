@@ -11,7 +11,7 @@ import org.slf4j.LoggerFactory
 private val log = LoggerFactory.getLogger("dev.jadxmcp.ToolRegistry")
 private val json = Json { prettyPrint = true; encodeDefaults = true }
 
-fun registerTools(server: Server, engine: JadxEngine) {
+fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine) {
     server.addTool("load_apk",
         "Load and analyze an APK/DEX file. Must be called first.",
         mkSchema { required("apk_path"); prop("apk_path", "string", "Absolute path to APK/DEX file") }
@@ -21,9 +21,9 @@ fun registerTools(server: Server, engine: JadxEngine) {
 
     server.addTool("list_classes",
         "List all decompiled classes. Optionally filter by package prefix.",
-        mkSchema { prop("filter", "string", "Optional package prefix filter") }
+        mkSchema { prop("filter", "string", "Optional package prefix filter"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }
     ) { req ->
-        wrap { json.encodeToString(engine.listClasses(req.arguments.optStr("filter"))) }
+        wrap { json.encodeToString(engine.listClasses(req.arguments.optStr("filter"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
 
     server.addTool("get_class_source",
@@ -35,9 +35,9 @@ fun registerTools(server: Server, engine: JadxEngine) {
 
     server.addTool("list_methods",
         "List all methods in a class with signatures and access modifiers.",
-        mkSchema { required("class_name"); prop("class_name", "string", "Fully qualified class name") }
+        mkSchema { required("class_name"); prop("class_name", "string", "Fully qualified class name"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }
     ) { req ->
-        wrap { json.encodeToString(engine.listMethods(req.arguments.str("class_name"))) }
+        wrap { json.encodeToString(engine.listMethods(req.arguments.str("class_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
 
     server.addTool("get_method_source",
@@ -76,9 +76,9 @@ fun registerTools(server: Server, engine: JadxEngine) {
 
     server.addTool("search_strings",
         "Search string constants across all classes. Finds URLs, API keys, secrets.",
-        mkSchema { required("query"); prop("query", "string", "Substring to search") }
+        mkSchema { required("query"); prop("query", "string", "Substring to search"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }
     ) { req ->
-        wrap { json.encodeToString(engine.searchStrings(req.arguments.str("query"))) }
+        wrap { json.encodeToString(engine.searchStrings(req.arguments.str("query"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
 
     server.addTool("get_callers",
@@ -117,17 +117,29 @@ fun registerTools(server: Server, engine: JadxEngine) {
     server.addTool("get_main_application_classes_names", "Fetch all the main application classes names", mkSchema {}) { req ->
         wrap { json.encodeToString(engine.getMainApplicationClassesNames()) }
     }
-    server.addTool("get_android_manifest", "Retrieve the AndroidManifest.xml content", mkSchema {}) { req ->
-        wrap { engine.getAndroidManifest() }
+    server.addTool("get_manifest_activities", "Retrieve all activities from AndroidManifest", mkSchema {}) { req ->
+        wrap { json.encodeToString(engine.getManifestComponent("activity")) }
     }
-    server.addTool("get_manifest_component", "Retrieve specific manifest component", mkSchema { required("component_type"); prop("component_type", "string", "Component type (e.g., activity, service)") }) { req ->
-        wrap { json.encodeToString(engine.getManifestComponent(req.arguments.str("component_type"))) }
+    server.addTool("get_manifest_services", "Retrieve all services from AndroidManifest", mkSchema {}) { req ->
+        wrap { json.encodeToString(engine.getManifestComponent("service")) }
     }
-    server.addTool("get_strings", "Fetches the strings.xml file", mkSchema {}) { req ->
-        wrap { engine.getStrings() }
+    server.addTool("get_manifest_receivers", "Retrieve all receivers from AndroidManifest", mkSchema {}) { req ->
+        wrap { json.encodeToString(engine.getManifestComponent("receiver")) }
     }
-    server.addTool("get_all_resource_file_names", "Retrieve all resource file names", mkSchema {}) { req ->
-        wrap { json.encodeToString(engine.getAllResourceFileNames()) }
+    server.addTool("get_manifest_providers", "Retrieve all providers from AndroidManifest", mkSchema {}) { req ->
+        wrap { json.encodeToString(engine.getManifestComponent("provider")) }
+    }
+    server.addTool("get_manifest_permissions", "Retrieve all used permissions from AndroidManifest", mkSchema {}) { req ->
+        wrap { json.encodeToString(engine.getManifestPermissions()) }
+    }
+    server.addTool("get_manifest_exported_components", "Retrieve all exported components from AndroidManifest", mkSchema {}) { req ->
+        wrap { json.encodeToString(engine.getManifestExportedComponents()) }
+    }
+    server.addTool("get_resource_strings", "Fetches paginated resource strings from strings.xml", mkSchema { prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
+        wrap { json.encodeToString(engine.getResourceStrings(req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    }
+    server.addTool("get_all_resource_file_names", "Retrieve all resource file names", mkSchema { prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
+        wrap { json.encodeToString(engine.getAllResourceFileNames(req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
     server.addTool("get_resource_file", "Retrieve resource file content", mkSchema { required("name"); prop("name", "string", "Original file name (e.g., AndroidManifest.xml)") }) { req ->
         wrap { engine.getResourceFile(req.arguments.str("name")) }
@@ -141,6 +153,28 @@ fun registerTools(server: Server, engine: JadxEngine) {
     }
     server.addTool("xrefs_to_field", "Find all references to a field", mkSchema { required("class_name", "field_name"); prop("class_name", "string", "Class name"); prop("field_name", "string", "Field name"); prop("limit", "integer", "Limit"); prop("offset", "integer", "Offset") }) { req ->
         wrap { json.encodeToString(engine.xrefsToField(req.arguments.str("class_name"), req.arguments.str("field_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    }
+
+    server.addTool("list_native_libraries", "List all .so libraries in the loaded APK", mkSchema {}) { req ->
+        wrap { json.encodeToString(nativeEngine.listNativeLibraries()) }
+    }
+    server.addTool("analyze_native_library", "Analyze a native library with Ghidra headless", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library (e.g., lib/arm64-v8a/libfoo.so)") }) { req ->
+        wrap { json.encodeToString(nativeEngine.analyzeNativeLibrary(req.arguments.str("lib_name"))) }
+    }
+    server.addTool("list_native_functions", "List all functions in a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
+        wrap { json.encodeToString(nativeEngine.getFunctions(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    }
+    server.addTool("get_native_function", "Get decompiled source and disassembly for a native function", mkSchema { required("lib_name", "query"); prop("lib_name", "string", "Name of the library"); prop("query", "string", "Function name or address") }) { req ->
+        wrap { json.encodeToString(nativeEngine.getFunction(req.arguments.str("lib_name"), req.arguments.str("query"))) }
+    }
+    server.addTool("list_native_strings", "List all strings in a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
+        wrap { json.encodeToString(nativeEngine.getStrings(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    }
+    server.addTool("list_native_imports", "List imports of a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
+        wrap { json.encodeToString(nativeEngine.getImports(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    }
+    server.addTool("list_native_exports", "List exports of a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
+        wrap { json.encodeToString(nativeEngine.getExports(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
 }
 
