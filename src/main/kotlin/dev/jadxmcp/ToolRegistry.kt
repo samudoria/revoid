@@ -12,104 +12,160 @@ private val log = LoggerFactory.getLogger("dev.jadxmcp.ToolRegistry")
 private val json = Json { prettyPrint = true; encodeDefaults = true }
 
 fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine) {
+    val page = "Pagination: limit (default 50), offset (default 0)"
+    fun SB.paging() { prop("limit", "integer", "Max items (default 50)"); prop("offset", "integer", "Items to skip (default 0)") }
+    fun JsonObject?.lim() = optInt("limit") ?: 50
+    fun JsonObject?.off() = optInt("offset") ?: 0
+
+    server.addTool("get_server_info", "Revoid and jadx versions plus capabilities (e.g. editing: true).", mkSchema {}) { _ ->
+        wrap { json.encodeToString(engine.serverInfo(nativeEngine.isReady())) }
+    }
+
     server.addTool("load_apk",
-        "Load and analyze an APK/DEX file. Must be called first.",
-        mkSchema { required("apk_path"); prop("apk_path", "string", "Absolute path to APK/DEX file") }
+        "Load and analyze an APK/DEX file. Must be called first. Resets any edits.",
+        mkSchema {
+            required("apk_path"); prop("apk_path", "string", "Absolute path to APK/DEX file")
+            prop("deobfuscation", "boolean", "Enable jadx deobfuscation (default false)")
+        }
     ) { req ->
-        wrap { json.encodeToString(engine.loadApk(req.arguments.str("apk_path"))) }
+        wrap { json.encodeToString(engine.loadApk(req.arguments.str("apk_path"), req.arguments.optBool("deobfuscation") ?: false)) }
     }
 
     server.addTool("list_classes",
-        "List all decompiled classes. Optionally filter by package prefix.",
-        mkSchema { prop("filter", "string", "Optional package prefix filter"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }
+        "List decompiled classes (inner classes included) with raw names. Optionally filter by package prefix.",
+        mkSchema { prop("filter", "string", "Optional package prefix filter"); paging() }
     ) { req ->
-        wrap { json.encodeToString(engine.listClasses(req.arguments.optStr("filter"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+        wrap { json.encodeToString(engine.listClasses(req.arguments.optStr("filter"), req.arguments.lim(), req.arguments.off())) }
     }
 
     server.addTool("get_class_source",
-        "Get full decompiled Java source of a class.",
-        mkSchema { required("class_name"); prop("class_name", "string", "Fully qualified class name") }
+        "Get decompiled Java source of a class (an inner class returns its top-level class's source). Output is capped; use start_line/end_line to page.",
+        mkSchema {
+            required("class_name"); prop("class_name", "string", "Class name: raw (a.b.Outer\$Inner) or current/earlier display name; exact match")
+            prop("start_line", "integer", "First line (1-based)"); prop("end_line", "integer", "Last line (inclusive)")
+            prop("line_numbers", "boolean", "Prefix lines with numbers (default false)")
+            prop("max_chars", "integer", "Size cap in characters (default ${JadxEngine.DEFAULT_MAX_CHARS})")
+        }
     ) { req ->
-        wrap { engine.getClassSource(req.arguments.str("class_name")) }
+        val a = req.arguments
+        wrap {
+            engine.getClassSource(a.str("class_name"), a.optInt("start_line"), a.optInt("end_line"),
+                a.optBool("line_numbers") ?: false, a.optInt("max_chars") ?: JadxEngine.DEFAULT_MAX_CHARS)
+        }
     }
 
     server.addTool("list_methods",
-        "List all methods in a class with signatures and access modifiers.",
-        mkSchema { required("class_name"); prop("class_name", "string", "Fully qualified class name"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }
+        "List methods in a class with full-type signatures and shortIds.",
+        mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)"); paging() }
     ) { req ->
-        wrap { json.encodeToString(engine.listMethods(req.arguments.str("class_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+        wrap { json.encodeToString(engine.listMethods(req.arguments.str("class_name"), req.arguments.lim(), req.arguments.off())) }
     }
 
     server.addTool("get_method_source",
-        "Get decompiled source of a specific method.",
+        "Get decompiled source of a method. Overloads: pass method_id (shortId) to select one, otherwise all overloads of the name are returned.",
         mkSchema {
             required("class_name", "method_name")
-            prop("class_name", "string", "Fully qualified class name")
-            prop("method_name", "string", "Method name")
+            prop("class_name", "string", "Class name (raw or display)")
+            prop("method_name", "string", "Method name (raw, display or earlier name)")
+            prop("method_id", "string", "Optional shortId, e.g. m(Ljava/lang/String;I)V")
         }
     ) { req ->
-        wrap { engine.getMethodSource(req.arguments.str("class_name"), req.arguments.str("method_name")) }
+        wrap { engine.getMethodSource(req.arguments.str("class_name"), req.arguments.str("method_name"), req.arguments.optStr("method_id")) }
     }
 
     server.addTool("get_class_summary",
         "Get structured summary: superclass, interfaces, counts, component type.",
-        mkSchema { required("class_name"); prop("class_name", "string", "Fully qualified class name") }
+        mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)") }
     ) { req ->
         wrap { json.encodeToString(engine.getClassSummary(req.arguments.str("class_name"))) }
     }
 
     server.addTool("search_classes",
-        "Search class names by substring or regex.",
-        mkSchema {
-            required("query")
-            prop("query", "string", "Search query")
-            prop("is_regex", "boolean", "Treat as regex (default: false)")
-        }
+        "Search class names (display or raw) by substring or regex.",
+        mkSchema { required("query"); prop("query", "string", "Search query"); prop("is_regex", "boolean", "Treat as regex (default: false)"); paging() }
     ) { req ->
-        wrap {
-            json.encodeToString(engine.searchClasses(
-                req.arguments.str("query"),
-                req.arguments.optBool("is_regex") ?: false
-            ))
-        }
+        wrap { json.encodeToString(engine.searchClasses(req.arguments.str("query"), req.arguments.optBool("is_regex") ?: false, req.arguments.lim(), req.arguments.off())) }
     }
 
     server.addTool("search_strings",
-        "Search string constants across all classes. Finds URLs, API keys, secrets.",
-        mkSchema { required("query"); prop("query", "string", "Substring to search"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }
+        "Search string constants across all classes. Also scans smali const-string for methods that failed to decompile.",
+        mkSchema { required("query"); prop("query", "string", "Substring to search"); paging() }
     ) { req ->
-        wrap { json.encodeToString(engine.searchStrings(req.arguments.str("query"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+        wrap { json.encodeToString(engine.searchStrings(req.arguments.str("query"), req.arguments.lim(), req.arguments.off())) }
     }
 
+    val sigDesc = "Method id 'rawClass#shortId', or display signature 'pkg.Cls.name(types):ret' (return optional), or 'pkg.Cls.name' if not overloaded"
+    val exactDesc = "Exact match (default true). false enables substring matching"
     server.addTool("get_callers",
-        "Get all methods that call a target method. Supports fuzzy matching.",
-        mkSchema { required("method_signature"); prop("method_signature", "string", "Method signature or partial name") }
+        "Get methods that call a target method.",
+        mkSchema { required("method_signature"); prop("method_signature", "string", sigDesc); prop("exact", "boolean", exactDesc); paging() }
     ) { req ->
-        wrap { json.encodeToString(engine.getCallers(req.arguments.str("method_signature"))) }
+        wrap { json.encodeToString(engine.getCallers(req.arguments.str("method_signature"), req.arguments.optBool("exact") ?: true, req.arguments.lim(), req.arguments.off())) }
     }
 
     server.addTool("get_callees",
-        "Get all methods called by a given method.",
-        mkSchema { required("method_signature"); prop("method_signature", "string", "Method signature or partial name") }
+        "Get methods called by a given method.",
+        mkSchema { required("method_signature"); prop("method_signature", "string", sigDesc); prop("exact", "boolean", exactDesc); paging() }
     ) { req ->
-        wrap { json.encodeToString(engine.getCallees(req.arguments.str("method_signature"))) }
+        wrap { json.encodeToString(engine.getCallees(req.arguments.str("method_signature"), req.arguments.optBool("exact") ?: true, req.arguments.lim(), req.arguments.off())) }
     }
 
-
-
-
-    server.addTool("search_method_by_name", "Search method across classes", mkSchema { required("query"); prop("query", "string", "Method name"); prop("is_regex", "boolean", "Treat as regex") }) { req ->
-        wrap { json.encodeToString(engine.searchMethodByName(req.arguments.str("query"), req.arguments.optBool("is_regex") ?: false)) }
+    server.addTool("search_method_by_name", "Search methods across classes by name (display or raw).",
+        mkSchema { required("query"); prop("query", "string", "Method name"); prop("is_regex", "boolean", "Treat as regex"); paging() }) { req ->
+        wrap { json.encodeToString(engine.searchMethodByName(req.arguments.str("query"), req.arguments.optBool("is_regex") ?: false, req.arguments.lim(), req.arguments.off())) }
     }
-    server.addTool("search_classes_by_keyword", "Search for classes whose source contains a keyword", mkSchema { required("keyword"); prop("keyword", "string", "Keyword"); prop("limit", "integer", "Limit (default: 50)"); prop("offset", "integer", "Offset (default: 0)") }) { req ->
-        wrap { json.encodeToString(engine.searchClassesByKeyword(req.arguments.str("keyword"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    server.addTool("search_classes_by_keyword", "Search for classes whose source contains a keyword",
+        mkSchema { required("keyword"); prop("keyword", "string", "Keyword"); paging() }) { req ->
+        wrap { json.encodeToString(engine.searchClassesByKeyword(req.arguments.str("keyword"), req.arguments.lim(), req.arguments.off())) }
     }
-    server.addTool("get_fields_of_class", "List fields in a class", mkSchema { required("class_name"); prop("class_name", "string", "Fully qualified class name") }) { req ->
+    server.addTool("get_fields_of_class", "List fields in a class", mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)") }) { req ->
         wrap { json.encodeToString(engine.getFieldsOfClass(req.arguments.str("class_name"))) }
     }
-    server.addTool("get_smali_of_class", "Fetch smali of class", mkSchema { required("class_name"); prop("class_name", "string", "Fully qualified class name") }) { req ->
+    server.addTool("get_smali_of_class", "Fetch smali of class", mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)") }) { req ->
         wrap { engine.getSmaliOfClass(req.arguments.str("class_name")) }
     }
+
+    // ── Live editing ──
+    val memberDesc = "Optional member: method/field name or shortId. Omit to target the class itself"
+    server.addTool("resolve_node", "Resolve a display or raw name to its raw jadx reference {refType, declClass, shortId}.",
+        mkSchema {
+            required("class_name"); prop("class_name", "string", "Class name (raw, display or earlier)"); prop("member", "string", memberDesc)
+            prop("fuzzy", "boolean", "Opt in to substring/suffix class matching (default false)")
+        }) { req ->
+        wrap { json.encodeToString(engine.resolveNode(req.arguments.str("class_name"), req.arguments.optStr("member"), req.arguments.optBool("fuzzy") ?: false)) }
+    }
+    server.addTool("rename_node",
+        "Rename a class, method or field (jadx code rename). Empty new_name resets. Refuses constructors and anonymous classes. Refreshes affected classes; old names keep resolving.",
+        mkSchema {
+            required("class_name", "new_name"); prop("class_name", "string", "Class name (raw or display)"); prop("member", "string", memberDesc)
+            prop("new_name", "string", "Valid Java identifier; empty string resets to the original name")
+        }) { req ->
+        wrap { json.encodeToString(engine.renameNode(req.arguments.str("class_name"), req.arguments.optStr("member"), req.arguments.str("new_name"))) }
+    }
+    server.addTool("add_comment",
+        "Add a comment to a class, method or field. Rejected on anonymous classes (not rendered); comment the outer class instead.",
+        mkSchema {
+            required("class_name", "text"); prop("class_name", "string", "Class name (raw or display)"); prop("member", "string", memberDesc)
+            prop("text", "string", "Comment text"); prop("style", "string", "LINE, BLOCK, BLOCK_CONDENSED, JAVADOC (default), JAVADOC_CONDENSED")
+        }) { req ->
+        wrap { json.encodeToString(engine.addComment(req.arguments.str("class_name"), req.arguments.optStr("member"), req.arguments.str("text"), req.arguments.optStr("style"))) }
+    }
+    server.addTool("list_annotations", "List renames and comments with raw references and indexes.", mkSchema {}) { _ ->
+        wrap { json.encodeToString(engine.listAnnotations()) }
+    }
+    server.addTool("remove_annotation", "Remove a rename/comment by its index from list_annotations (indexes shift after removal).",
+        mkSchema { required("index"); prop("index", "integer", "Index from list_annotations") }) { req ->
+        wrap { json.encodeToString(engine.removeAnnotation(req.arguments.optInt("index") ?: throw IllegalArgumentException("Missing: index"))) }
+    }
+    server.addTool("save_project", "Save renames/comments to a jadx-gui .jadx file. Path must be inside REVOID_OUTPUT_ROOT (relative paths resolve there).",
+        mkSchema { required("path"); prop("path", "string", "Target .jadx path")}) { req ->
+        wrap { json.encodeToString(engine.saveProject(req.arguments.str("path"))) }
+    }
+    server.addTool("load_project", "Replace current renames/comments with those from a jadx-gui .jadx file and reload affected classes.",
+        mkSchema { required("path"); prop("path", "string", "Path to .jadx file") }) { req ->
+        wrap { json.encodeToString(engine.loadProject(req.arguments.str("path"))) }
+    }
+
     server.addTool("get_main_activity_class", "Fetch main activity from AndroidManifest", mkSchema {}) { req ->
         wrap { engine.getMainActivityClass() }
     }
@@ -118,7 +174,7 @@ fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine
         wrap { json.encodeToString(engine.getMainApplicationClassesNames()) }
     }
     server.addTool("get_manifest_activities", "Retrieve all activities from AndroidManifest", mkSchema {}) { req ->
-        wrap { json.encodeToString(engine.getManifestComponent("activity")) }
+        wrap { json.encodeToString(engine.getManifestActivities()) }
     }
     server.addTool("get_manifest_services", "Retrieve all services from AndroidManifest", mkSchema {}) { req ->
         wrap { json.encodeToString(engine.getManifestComponent("service")) }
@@ -145,11 +201,11 @@ fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine
         wrap { engine.getResourceFile(req.arguments.str("name")) }
     }
 
-    server.addTool("xrefs_to_class", "Find all references to a class", mkSchema { required("class_name"); prop("class_name", "string", "Class name"); prop("limit", "integer", "Limit"); prop("offset", "integer", "Offset") }) { req ->
+    server.addTool("xrefs_to_class", "Find all references to a class", mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)"); paging() }) { req ->
         wrap { json.encodeToString(engine.xrefsToClass(req.arguments.str("class_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
-    server.addTool("xrefs_to_method", "Find all references to a method", mkSchema { required("method_signature"); prop("method_signature", "string", "Method signature"); prop("limit", "integer", "Limit"); prop("offset", "integer", "Offset") }) { req ->
-        wrap { json.encodeToString(engine.xrefsToMethod(req.arguments.str("method_signature"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    server.addTool("xrefs_to_method", "Find all references to a method", mkSchema { required("method_signature"); prop("method_signature", "string", sigDesc); prop("exact", "boolean", exactDesc); paging() }) { req ->
+        wrap { json.encodeToString(engine.xrefsToMethod(req.arguments.str("method_signature"), req.arguments.lim(), req.arguments.off(), req.arguments.optBool("exact") ?: true)) }
     }
     server.addTool("xrefs_to_field", "Find all references to a field", mkSchema { required("class_name", "field_name"); prop("class_name", "string", "Class name"); prop("field_name", "string", "Field name"); prop("limit", "integer", "Limit"); prop("offset", "integer", "Offset") }) { req ->
         wrap { json.encodeToString(engine.xrefsToField(req.arguments.str("class_name"), req.arguments.str("field_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }

@@ -12,12 +12,14 @@ import kotlinx.io.asSource
 import kotlinx.io.buffered
 import org.slf4j.LoggerFactory
 
+const val REVOID_VERSION = "1.0.0"
+
 fun main(): Unit = runBlocking {
     val log = LoggerFactory.getLogger("dev.jadxmcp.Main")
     log.info("Starting JADX Headless MCP Server v1.0.0")
 
     val server = Server(
-        serverInfo = Implementation("jadx-headless-mcp", "1.0.0"),
+        serverInfo = Implementation("jadx-headless-mcp", REVOID_VERSION),
         options = ServerOptions(
             capabilities = ServerCapabilities(
                 tools = ServerCapabilities.Tools(listChanged = true),

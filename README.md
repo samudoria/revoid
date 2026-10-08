@@ -75,8 +75,14 @@ Make sure to replace `/path/to/...` with the absolute path to the generated JAR 
 | `search_classes_by_keyword` | Search for classes whose source code contains a specific keyword. |
 | `search_method_by_name` | Search methods across all classes by substring or regex. |
 | `search_strings` | Search for string constants across all classes (URLs, API keys, etc.). |
-| `get_callers` | Get all methods that call a target method. |
+| `get_callers` | Methods that call a target (exact by default; `exact=false` for substring). Paginated. |
 | `get_callees` | Get all methods called by a given method. |
+| `get_server_info` | Revoid/jadx versions and capabilities (`editing: true`). |
+| `resolve_node` | Display or raw name → raw ref `{refType, declClass, shortId}`. |
+| `rename_node` | Rename a class/method/field; empty name resets. Refreshes affected classes. |
+| `add_comment` | Add a comment to a class/method/field (not anonymous classes). |
+| `list_annotations` / `remove_annotation` | List or remove renames/comments (by index). |
+| `save_project` / `load_project` | Write/read a jadx-gui `.jadx` file. Saves are confined to `REVOID_OUTPUT_ROOT`. |
 | `xrefs_to_class` | Find all cross-references (usages) to a specific class. |
 | `xrefs_to_method` | Find all cross-references (callers/usages) to a specific method. |
 | `xrefs_to_field` | Find all cross-references (reads/writes) to a specific field. |
@@ -101,3 +107,21 @@ Make sure to replace `/path/to/...` with the absolute path to the generated JAR 
 ## Logging
 
 The server uses STDIO for MCP JSON-RPC communication. Therefore, all standard output (`stdout`) is reserved strictly for protocol messages. Diagnostic logs and jadx warnings are routed exclusively to standard error (`stderr`).
+
+## Names and editing
+
+Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#shortId` (e.g. `a.b.C#m(Ljava/lang/String;I)V`). Lookups are exact and accept the raw name, the current display name, or any earlier display name from this session; a miss lists candidates.
+
+## Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `GHIDRA_HOME` | Ghidra install for native analysis |
+| `REVOID_OUTPUT_ROOT` | Folder `save_project` may write to (default `~/.revoid_output`) |
+| `REVOID_AUTOSAVE` | `1` saves to `<apk name>.jadx` in the output root after every edit; any other value is used as the project path. Unset = manual `save_project` |
+| `REVOID_CACHE_DIR` | Native analysis cache (default `~/.revoid_native_cache`) |
+| `REVOID_GHIDRA_TIMEOUT_SECONDS` | Ghidra subprocess timeout (default 900) |
+
+## Releases
+
+Pushing a tag like `v1.1.0` runs `.github/workflows/release.yml`, which tests, builds the fat JAR and attaches `revoid-<tag>.jar` to a GitHub release. Run it with `java -jar revoid-<tag>.jar`.

@@ -22,6 +22,9 @@ data class ApkInfo(
 @Serializable
 data class MethodInfo(
     val name: String,
+    val rawName: String,
+    val shortId: String,
+    val declClass: String,
     val fullSignature: String,
     val returnType: String,
     val parameterTypes: List<String>,
@@ -36,6 +39,8 @@ data class StringMatch(
     val value: String,
     val className: String,
     val lineNumber: Int? = null,
+    val origin: String? = null, // "smali" when found in a method that failed to decompile
+    val methodId: String? = null,
 )
 
 
@@ -45,6 +50,7 @@ data class StringMatch(
 @Serializable
 data class ClassSummary(
     val name: String,
+    val rawName: String,
     val superClass: String? = null,
     val interfaces: List<String> = emptyList(),
     val methodCount: Int = 0,
@@ -62,6 +68,9 @@ data class ClassSummary(
 @Serializable
 data class FieldInfo(
     val name: String,
+    val rawName: String,
+    val shortId: String,
+    val declClass: String,
     val type: String,
     val accessFlags: String,
 )
@@ -72,7 +81,9 @@ data class FieldInfo(
 @Serializable
 data class XrefInfo(
     val usedInClass: String,
+    val usedInClassRaw: String? = null,
     val usedInMethod: String? = null,
+    val usedInMethodId: String? = null,
     val line: Int? = null,
 )
 
@@ -92,11 +103,58 @@ data class PaginatedXrefs(
  */
 @Serializable
 data class PaginatedClasses(
-    val items: List<String>,
+    val items: List<ClassRef>,
     val totalCount: Int,
     val limit: Int,
     val offset: Int,
 )
+
+/** A class by display name plus its stable raw (original) name. */
+@Serializable
+data class ClassRef(val name: String, val rawName: String)
+
+/** A method by display signature plus its stable id (`rawDeclClass#shortId`). */
+@Serializable
+data class MethodRef(val signature: String, val id: String)
+
+@Serializable
+data class PaginatedMethodRefs(
+    val items: List<MethodRef>,
+    val totalCount: Int,
+    val limit: Int,
+    val offset: Int,
+)
+
+/** Raw jadx node reference: declClass is the raw class name; shortId is null for classes. */
+@Serializable
+data class RefInfo(val refType: String, val declClass: String, val shortId: String? = null)
+
+@Serializable
+data class EditResult(
+    val ref: RefInfo,
+    val target: String,
+    val oldName: String? = null,
+    val newName: String? = null,
+    val refreshedClasses: List<ClassRef>,
+)
+
+@Serializable
+data class AnnotationInfo(
+    val index: Int,
+    val kind: String, // rename | comment
+    val ref: RefInfo,
+    val target: String? = null,
+    val newName: String? = null,
+    val text: String? = null,
+    val style: String? = null,
+    val codeRef: String? = null,
+)
+
+@Serializable
+data class ProjectResult(val path: String, val renames: Int, val comments: Int, val refreshedClasses: Int = 0)
+
+@Serializable
+data class ServerInfo(val revoidVersion: String, val jadxVersion: String, val capabilities: Map<String, Boolean>)
 
 /**
  * Component from AndroidManifest.xml

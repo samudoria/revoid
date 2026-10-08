@@ -16,7 +16,7 @@ class NativeEngine(private val jadxEngine: JadxEngine) {
     private val log = LoggerFactory.getLogger(NativeEngine::class.java)
 
     private val ghidraHome: String? = System.getenv("GHIDRA_HOME") ?: System.getProperty("ghidra.home")
-    private val cacheDir = File(System.getProperty("user.home"), ".revoid_native_cache").apply { mkdirs() }
+    private val cacheDir = File(System.getenv("REVOID_CACHE_DIR") ?: File(System.getProperty("user.home"), ".revoid_native_cache").path).apply { mkdirs() }
 
     // In-memory cache of analysis results
     // libName -> Cache
@@ -26,6 +26,8 @@ class NativeEngine(private val jadxEngine: JadxEngine) {
     private val importsCache = ConcurrentHashMap<String, List<NativeImport>>()
     private val exportsCache = ConcurrentHashMap<String, List<NativeExport>>()
     private val globalsCache = ConcurrentHashMap<String, List<NativeGlobal>>()
+
+    private val ghidraTimeoutSec = System.getenv("REVOID_GHIDRA_TIMEOUT_SECONDS")?.toLongOrNull() ?: 900L
 
     init {
         if (ghidraHome.isNullOrEmpty()) {
@@ -188,14 +190,16 @@ class NativeEngine(private val jadxEngine: JadxEngine) {
             pb.redirectErrorStream(true)
             val process = pb.start()
 
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    System.err.println("[Ghidra] $line") // stream to stderr
-                }
-            }
+            // Drain output on a thread so the timeout below can fire even if Ghidra hangs silently.
+            Thread {
+                BufferedReader(InputStreamReader(process.inputStream)).useLines { it.forEach { l -> System.err.println("[Ghidra] $l") } }
+            }.apply { isDaemon = true; start() }
 
-            val exitCode = process.waitFor()
+            if (!process.waitFor(ghidraTimeoutSec, java.util.concurrent.TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                throw IllegalStateException("Ghidra timed out after ${ghidraTimeoutSec}s (REVOID_GHIDRA_TIMEOUT_SECONDS)")
+            }
+            val exitCode = process.exitValue()
             if (!tempOutput.exists()) {
                 log.error("Ghidra analysis failed or no output produced. Exit code: $exitCode")
                 throw RuntimeException("Ghidra completed but no output produced.")
