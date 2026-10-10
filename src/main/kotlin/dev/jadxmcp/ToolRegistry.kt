@@ -166,6 +166,25 @@ fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine
         wrap { json.encodeToString(engine.loadProject(req.arguments.str("path"))) }
     }
 
+    server.addTool("summarize_function",
+        "Add a summary comment at the top of a function. Write the summary yourself from the source (what it does, key inputs/outputs). Java: pass class_name + method (comment shown in get_method_source). Native: pass lib_name + function (shown atop get_native_function output; kept in memory only).",
+        mkSchema {
+            required("summary"); prop("summary", "string", "Summary text")
+            prop("class_name", "string", "Java class name (raw or display)"); prop("method", "string", "Java method name or shortId")
+            prop("lib_name", "string", "Native library name"); prop("function", "string", "Native function name or address")
+        }) { req ->
+        val a = req.arguments
+        wrap {
+            val text = a.str("summary")
+            if (a.optStr("lib_name") != null) {
+                val n = nativeEngine.summarize(a.str("lib_name"), a.str("function"), text)
+                "Summarized native function $n"
+            } else {
+                json.encodeToString(engine.addComment(a.str("class_name"), a.str("method"), text, "BLOCK"))
+            }
+        }
+    }
+
     server.addTool("get_main_activity_class", "Fetch main activity from AndroidManifest", mkSchema {}) { req ->
         wrap { engine.getMainActivityClass() }
     }

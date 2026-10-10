@@ -125,7 +125,23 @@ class NativeEngine(private val jadxEngine: JadxEngine) {
         return PaginatedNativeExports(paged, exports.size, limit, offset)
     }
 
+    private val summaries = ConcurrentHashMap<Pair<String, Long>, String>()
+
+    /** Stores [summary] for a function; getFunction prepends it to the decompiled code. */
+    fun summarize(libName: String, query: String, summary: String): String {
+        require(summary.isNotBlank()) { "Summary is empty" }
+        val f = findFunction(libName, query)
+        summaries[libName to f.address] = summary.trim().replace("*/", "* /")
+        return f.name
+    }
+
     fun getFunction(libName: String, query: String): NativeFunction {
+        val f = findFunction(libName, query)
+        val s = summaries[libName to f.address] ?: return f
+        return f.copy(decompiled = "/* SUMMARY: $s */\n${f.decompiled}")
+    }
+
+    private fun findFunction(libName: String, query: String): NativeFunction {
         val map = functionMapCache[libName] ?: throw IllegalArgumentException("Library '$libName' not analyzed yet.")
         val functions = functionsCache[libName] ?: emptyList()
         
