@@ -149,6 +149,13 @@ class JadxEngineTest {
         assertThrows(IllegalArgumentException::class.java) { engine.renameNode(login, null, "class") }
         assertThrows(IllegalArgumentException::class.java) { engine.renameNode(login, "<init>", "x") }
 
+        // edits are autosaved and restored when the same APK is loaded again
+        JadxEngine().let { other ->
+            other.loadApk(File("test-app/build/sample.jar").absolutePath)
+            assertEquals(3, other.listAnnotations().size)
+            other.close()
+        }
+
         val saved = engine.saveProject("revoid-test.jadx")
         assertEquals(2, saved.renames)
         engine.listAnnotations().indices.reversed().forEach { engine.removeAnnotation(it) }

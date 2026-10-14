@@ -101,6 +101,9 @@ class JadxEngine {
         buildIndexes(jadx)
 
         log.info("Loaded {} classes from {}", classIndex.size, path)
+        autosavePath()?.takeIf { File(it).isFile }?.let { p ->
+            try { loadProject(p); log.info("Restored edits from {}", p) } catch (e: Exception) { log.warn("Could not restore {}: {}", p, e.message) }
+        }
         return ApkInfo(
             status = "loaded",
             apkId = currentApkId!!,
@@ -664,10 +667,15 @@ class JadxEngine {
         return tops.map { ClassRef(it.fullName, it.rawName) }
     }
 
-    /** REVOID_AUTOSAVE=1 saves to `<apk>.jadx` after every edit; any other value is used as the project path. */
+    /** Edits are saved after every change to `<apk name>.jadx` in the output root. REVOID_AUTOSAVE=<path> overrides the path, =0 disables. */
+    private fun autosavePath(): String? {
+        val v = System.getenv("REVOID_AUTOSAVE")
+        if (v != null && (v == "0" || v.equals("false", true))) return null
+        return if (v.isNullOrBlank() || v == "1" || v.equals("true", true)) File(outputRoot(), "$currentApkId.jadx").path else v
+    }
+
     private fun autosave() {
-        val v = System.getenv("REVOID_AUTOSAVE")?.takeIf { it.isNotBlank() && it != "0" && !it.equals("false", true) } ?: return
-        val path = if (v == "1" || v.equals("true", true)) "$currentApkId.jadx" else v
+        val path = autosavePath() ?: return
         try { saveProject(path) } catch (e: Exception) { log.warn("Autosave to {} failed: {}", path, e.message) }
     }
 

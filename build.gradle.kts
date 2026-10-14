@@ -42,6 +42,9 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    val out = layout.buildDirectory.dir("test-out").get().asFile
+    environment("REVOID_OUTPUT_ROOT", out.path)  // autosave target; start clean
+    doFirst { out.deleteRecursively() }
 }
 
 application {

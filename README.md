@@ -113,7 +113,7 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 | Variable | Purpose |
 |----------|---------|
 | `REVOID_OUTPUT_ROOT` | Folder `save_project` and `extract_native_library` may write to (default `~/.revoid_output`) |
-| `REVOID_AUTOSAVE` | `1` saves to `<apk name>.jadx` in the output root after every edit; any other value is used as the project path. Unset = manual `save_project` |
+| `REVOID_AUTOSAVE` | Edits are saved after every change to `<apk name>.jadx` in the output root and restored on the next `load_apk` of the same APK. Set a path to save elsewhere, `0` to disable |
 
 ## Releases
 
