@@ -167,71 +167,6 @@ data class ManifestComponent(
     val rawXml: String,
 )
 
-/**
- * Result from analyze_native_library.
- */
-@Serializable
-data class NativeAnalysisSummary(
-    val libraryName: String,
-    val functionCount: Int,
-    val importCount: Int,
-    val exportCount: Int,
-    val stringCount: Int,
-    val globalCount: Int,
-    val cached: Boolean
-)
-
-@Serializable
-enum class ReferenceType {
-    CALL, JUMP, DATA, READ, WRITE
-}
-
-@Serializable
-data class NativeReference(
-    val sourceAddress: Long,
-    val destinationAddress: Long,
-    val type: ReferenceType
-)
-
-@Serializable
-data class NativeFunction(
-    val name: String,
-    val address: Long,
-    val size: Long = 0,
-    val disassembly: String = "",
-    val decompiled: String = "",
-    val incomingReferences: List<NativeReference> = emptyList(),
-    val outgoingReferences: List<NativeReference> = emptyList()
-)
-
-@Serializable
-data class NativeImport(
-    val name: String,
-    val address: Long
-)
-
-@Serializable
-data class NativeExport(
-    val name: String,
-    val address: Long
-)
-
-@Serializable
-data class NativeString(
-    val address: Long,
-    val stringValue: String,
-    val length: Int,
-    val referenceCount: Int
-)
-
-@Serializable
-data class NativeGlobal(
-    val address: Long,
-    val name: String,
-    val size: Int,
-    val dataType: String
-)
-
 @Serializable
 data class PaginatedMethods(
     val items: List<MethodInfo>,
@@ -270,34 +205,3 @@ data class PaginatedResourceStrings(
     val offset: Int,
 )
 
-@Serializable
-data class PaginatedNativeFunctions(
-    val items: List<NativeFunction>,
-    val totalCount: Int,
-    val limit: Int,
-    val offset: Int,
-)
-
-@Serializable
-data class PaginatedNativeStrings(
-    val items: List<NativeString>,
-    val totalCount: Int,
-    val limit: Int,
-    val offset: Int,
-)
-
-@Serializable
-data class PaginatedNativeImports(
-    val items: List<NativeImport>,
-    val totalCount: Int,
-    val limit: Int,
-    val offset: Int,
-)
-
-@Serializable
-data class PaginatedNativeExports(
-    val items: List<NativeExport>,
-    val totalCount: Int,
-    val limit: Int,
-    val offset: Int,
-)

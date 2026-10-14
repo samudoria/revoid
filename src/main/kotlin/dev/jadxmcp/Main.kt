@@ -28,8 +28,7 @@ fun main(): Unit = runBlocking {
     )
 
     val engine = JadxEngine()
-    val nativeEngine = NativeEngine(engine)
-    registerTools(server, engine, nativeEngine)
+    registerTools(server, engine)
     log.info("Registered MCP tools, connecting STDIO transport...")
 
     val transport = StdioServerTransport(

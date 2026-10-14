@@ -25,6 +25,7 @@ import org.slf4j.LoggerFactory
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.io.File
+import java.util.zip.ZipFile
 import java.io.StringReader
 import java.io.StringWriter
 import java.util.concurrent.ConcurrentHashMap
@@ -109,11 +110,28 @@ class JadxEngine {
         )
     }
 
-    fun serverInfo(nativeReady: Boolean) = ServerInfo(
+    fun serverInfo() = ServerInfo(
         revoidVersion = REVOID_VERSION,
         jadxVersion = JadxDecompiler.getVersion(),
-        capabilities = mapOf("editing" to true, "pagination" to true, "nativeAnalysis" to nativeReady),
+        capabilities = mapOf("editing" to true, "pagination" to true),
     )
+
+    fun listNativeLibraries(): List<String> {
+        ensureLoaded()
+        return ZipFile(currentApkPath!!).use { z -> z.entries().asSequence().map { it.name }.filter { it.endsWith(".so") }.sorted().toList() }
+    }
+
+    /** Extracts a .so from the APK into REVOID_OUTPUT_ROOT/native/ so a native-analysis MCP server (e.g. ghidra-headless-mcp) can open it. */
+    fun extractNativeLibrary(libName: String): String {
+        ensureLoaded()
+        val target = File(outputRoot(), "native/" + libName.removePrefix("lib/").replace('/', '_')).canonicalFile
+        ZipFile(currentApkPath!!).use { z ->
+            val e = z.getEntry(libName) ?: throw IllegalArgumentException("Library '$libName' not found; use list_native_libraries")
+            target.parentFile.mkdirs()
+            z.getInputStream(e).use { i -> target.outputStream().use { i.copyTo(it) } }
+        }
+        return target.path
+    }
 
     // ── Classes ──────────────────────────────────────────────
 

@@ -2,15 +2,15 @@
 
 Revoid is a fully headless, analysis-first Model Context Protocol (MCP) server for Android reverse engineering, built on top of `jadx-core`. It is the companion MCP server for [JADX Native](https://github.com/samudoria/jadx_native).
 
-Unlike UI-based decompiler tools, this server is designed specifically for Large Language Models (LLMs) to programmatically analyze, query, and navigate APK, DEX, and native `.so` files deterministically. It behaves like a program analysis database interface.
+Unlike UI-based decompiler tools, this server is designed specifically for Large Language Models (LLMs) to programmatically analyze, query, and navigate APK, DEX deterministically. It behaves like a program analysis database interface.
 
 ## Features
 
 - **Headless-First**: Uses the `jadx-core` library directly for high-performance, headless decompilation.
-- **Native Library Analysis**: Integrates with Ghidra's headless analyzer to extract, decompile, and disassemble native `.so` functions.
+- **Native libraries**: `.so` files are extracted from the APK; analyze them with the companion [ghidra-headless-mcp](https://github.com/samudoria/ghidra-headless-mcp) server.
 - **In-Memory Indexing**: Automatically builds indexes for classes, methods, and strings upon loading an APK.
 - **Call Graph Analysis**: Computes forward and reverse execution paths (callers and callees) programmatically from bytecode `INVOKE` instructions.
-- **Context-Window Optimized**: All list APIs (classes, methods, strings, native functions) are paginated to prevent LLM context bloat.
+- **Context-Window Optimized**: All list APIs (classes, methods, strings) are paginated to prevent LLM context bloat.
 - **Deterministic**: Provides consistent results without relying on GUI state, selected text, or HTTP bridges.
 
 ## Tech Stack
@@ -97,12 +97,8 @@ Make sure to replace `/path/to/...` with the absolute path to the generated JAR 
 | `get_resource_strings` | Paginated retrieval of key-value pairs from `res/values/strings.xml`. |
 | `get_all_resource_file_names` | Retrieve a paginated list of all resource file names inside the APK. |
 | `get_resource_file` | Retrieve the decoded content of a specific resource file. |
-| `analyze_native_library` | Run Ghidra headless analysis on a specific `.so` file. |
-| `list_native_functions` | Paginated list of all functions in a native library. |
-| `get_native_function` | Get the decompiled C/C++ source code and disassembly of a native function. |
-| `list_native_strings` | Paginated list of all strings in a native library. |
-| `list_native_imports` | Paginated list of all imports in a native library. |
-| `list_native_exports` | Paginated list of all exports in a native library. |
+| `list_native_libraries` | List `.so` files inside the APK. |
+| `extract_native_library` | Extract a `.so` to `REVOID_OUTPUT_ROOT/native/` and return its path; open it with `ghidra-headless-mcp`'s `load_binary`. |
 
 ## Logging
 
@@ -116,11 +112,8 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 
 | Variable | Purpose |
 |----------|---------|
-| `GHIDRA_HOME` | Ghidra install for native analysis |
-| `REVOID_OUTPUT_ROOT` | Folder `save_project` may write to (default `~/.revoid_output`) |
+| `REVOID_OUTPUT_ROOT` | Folder `save_project` and `extract_native_library` may write to (default `~/.revoid_output`) |
 | `REVOID_AUTOSAVE` | `1` saves to `<apk name>.jadx` in the output root after every edit; any other value is used as the project path. Unset = manual `save_project` |
-| `REVOID_CACHE_DIR` | Native analysis cache (default `~/.revoid_native_cache`) |
-| `REVOID_GHIDRA_TIMEOUT_SECONDS` | Ghidra subprocess timeout (default 900) |
 
 ## Releases
 

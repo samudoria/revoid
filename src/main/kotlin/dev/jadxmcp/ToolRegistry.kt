@@ -11,14 +11,14 @@ import org.slf4j.LoggerFactory
 private val log = LoggerFactory.getLogger("dev.jadxmcp.ToolRegistry")
 private val json = Json { prettyPrint = true; encodeDefaults = true }
 
-fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine) {
+fun registerTools(server: Server, engine: JadxEngine) {
     val page = "Pagination: limit (default 50), offset (default 0)"
     fun SB.paging() { prop("limit", "integer", "Max items (default 50)"); prop("offset", "integer", "Items to skip (default 0)") }
     fun JsonObject?.lim() = optInt("limit") ?: 50
     fun JsonObject?.off() = optInt("offset") ?: 0
 
     server.addTool("get_server_info", "Revoid and jadx versions plus capabilities (e.g. editing: true).", mkSchema {}) { _ ->
-        wrap { json.encodeToString(engine.serverInfo(nativeEngine.isReady())) }
+        wrap { json.encodeToString(engine.serverInfo()) }
     }
 
     server.addTool("load_apk",
@@ -167,21 +167,15 @@ fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine
     }
 
     server.addTool("summarize_function",
-        "Add a summary comment at the top of a function. Write the summary yourself from the source (what it does, key inputs/outputs). Java: pass class_name + method (comment shown in get_method_source). Native: pass lib_name + function (shown atop get_native_function output; kept in memory only).",
+        "Add a summary comment at the top of a function. Write the summary yourself from the source (what it does, key inputs/outputs). Java: pass class_name + method (comment shown in get_method_source).",
         mkSchema {
             required("summary"); prop("summary", "string", "Summary text")
             prop("class_name", "string", "Java class name (raw or display)"); prop("method", "string", "Java method name or shortId")
-            prop("lib_name", "string", "Native library name"); prop("function", "string", "Native function name or address")
         }) { req ->
         val a = req.arguments
         wrap {
             val text = a.str("summary")
-            if (a.optStr("lib_name") != null) {
-                val n = nativeEngine.summarize(a.str("lib_name"), a.str("function"), text)
-                "Summarized native function $n"
-            } else {
-                json.encodeToString(engine.addComment(a.str("class_name"), a.str("method"), text, "BLOCK"))
-            }
+            json.encodeToString(engine.addComment(a.str("class_name"), a.str("method"), text, "BLOCK"))
         }
     }
 
@@ -230,26 +224,13 @@ fun registerTools(server: Server, engine: JadxEngine, nativeEngine: NativeEngine
         wrap { json.encodeToString(engine.xrefsToField(req.arguments.str("class_name"), req.arguments.str("field_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
 
-    server.addTool("list_native_libraries", "List all .so libraries in the loaded APK", mkSchema {}) { req ->
-        wrap { json.encodeToString(nativeEngine.listNativeLibraries()) }
+    server.addTool("list_native_libraries", "List .so libraries in the loaded APK (paths inside the APK).", mkSchema {}) { _ ->
+        wrap { json.encodeToString(engine.listNativeLibraries()) }
     }
-    server.addTool("analyze_native_library", "Analyze a native library with Ghidra headless", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library (e.g., lib/arm64-v8a/libfoo.so)") }) { req ->
-        wrap { json.encodeToString(nativeEngine.analyzeNativeLibrary(req.arguments.str("lib_name"))) }
-    }
-    server.addTool("list_native_functions", "List all functions in a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
-        wrap { json.encodeToString(nativeEngine.getFunctions(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
-    }
-    server.addTool("get_native_function", "Get decompiled source and disassembly for a native function", mkSchema { required("lib_name", "query"); prop("lib_name", "string", "Name of the library"); prop("query", "string", "Function name or address") }) { req ->
-        wrap { json.encodeToString(nativeEngine.getFunction(req.arguments.str("lib_name"), req.arguments.str("query"))) }
-    }
-    server.addTool("list_native_strings", "List all strings in a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
-        wrap { json.encodeToString(nativeEngine.getStrings(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
-    }
-    server.addTool("list_native_imports", "List imports of a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
-        wrap { json.encodeToString(nativeEngine.getImports(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
-    }
-    server.addTool("list_native_exports", "List exports of a native library", mkSchema { required("lib_name"); prop("lib_name", "string", "Name of the library"); prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
-        wrap { json.encodeToString(nativeEngine.getExports(req.arguments.str("lib_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
+    server.addTool("extract_native_library",
+        "Extract a .so from the APK to disk and return its absolute path, for native analysis with ghidra-headless-mcp (load_binary). Saved under REVOID_OUTPUT_ROOT/native.",
+        mkSchema { required("lib_name"); prop("lib_name", "string", "Path inside the APK, from list_native_libraries") }) { req ->
+        wrap { engine.extractNativeLibrary(req.arguments.str("lib_name")) }
     }
 }
 

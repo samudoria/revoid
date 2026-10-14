@@ -122,7 +122,7 @@ class JadxEngineTest {
 
     @Test
     fun testServerInfo() {
-        assertTrue(engine.serverInfo(false).capabilities["editing"] == true)
+        assertTrue(engine.serverInfo().capabilities["editing"] == true)
     }
 
     // Edits mutate shared state, so run them as one ordered scenario.
