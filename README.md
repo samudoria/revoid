@@ -2,7 +2,7 @@
 
 Revoid is a fully headless, analysis-first Model Context Protocol (MCP) server for Android reverse engineering, built on top of `jadx-core`. It is the companion MCP server for [JADX Native](https://github.com/samudoria/jadx_native).
 
-Unlike UI-based decompiler tools, this server is designed specifically for Large Language Models (LLMs) to programmatically analyze, query, and navigate APK, DEX deterministically. It behaves like a program analysis database interface.
+Unlike UI-based decompiler tools, this server is designed specifically for Large Language Models (LLMs) to programmatically analyze, query, and navigate APK and DEX files deterministically. It behaves like a program analysis database interface.
 
 ## Features
 
