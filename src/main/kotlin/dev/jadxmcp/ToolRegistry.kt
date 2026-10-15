@@ -223,15 +223,6 @@ fun registerTools(server: Server, engine: JadxEngine) {
     server.addTool("xrefs_to_field", "Find all references to a field", mkSchema { required("class_name", "field_name"); prop("class_name", "string", "Class name"); prop("field_name", "string", "Field name"); prop("limit", "integer", "Limit"); prop("offset", "integer", "Offset") }) { req ->
         wrap { json.encodeToString(engine.xrefsToField(req.arguments.str("class_name"), req.arguments.str("field_name"), req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
-
-    server.addTool("list_native_libraries", "List .so libraries in the loaded APK (paths inside the APK).", mkSchema {}) { _ ->
-        wrap { json.encodeToString(engine.listNativeLibraries()) }
-    }
-    server.addTool("extract_native_library",
-        "Extract a .so from the APK to disk and return its absolute path, for native analysis with ghidra-headless-mcp (load_binary). Saved under REVOID_OUTPUT_ROOT/native.",
-        mkSchema { required("lib_name"); prop("lib_name", "string", "Path inside the APK, from list_native_libraries") }) { req ->
-        wrap { engine.extractNativeLibrary(req.arguments.str("lib_name")) }
-    }
 }
 
 private inline fun wrap(block: () -> String): CallToolResult = try {

@@ -1,13 +1,12 @@
 # Revoid: JADX Headless MCP Server
 
-Revoid is a fully headless, analysis-first Model Context Protocol (MCP) server for Android reverse engineering, built on top of `jadx-core`. It is the companion MCP server for [JADX Native](https://github.com/samudoria/jadx_native).
+Revoid is a fully headless, analysis-first Model Context Protocol (MCP) server for Android reverse engineering, built on top of `jadx-core`.
 
 Unlike UI-based decompiler tools, this server is designed specifically for Large Language Models (LLMs) to programmatically analyze, query, and navigate APK and DEX files deterministically. It behaves like a program analysis database interface.
 
 ## Features
 
 - **Headless-First**: Uses the `jadx-core` library directly for high-performance, headless decompilation.
-- **Native libraries**: `.so` files are extracted from the APK; analyze them with the companion [ghidra-headless-mcp](https://github.com/samudoria/ghidra-headless-mcp) server.
 - **In-Memory Indexing**: Automatically builds indexes for classes, methods, and strings upon loading an APK.
 - **Call Graph Analysis**: Computes forward and reverse execution paths (callers and callees) programmatically from bytecode `INVOKE` instructions.
 - **Context-Window Optimized**: All list APIs (classes, methods, strings) are paginated to prevent LLM context bloat.
@@ -59,6 +58,23 @@ To use the server with Claude Desktop, add the following to your `claude_desktop
 
 Make sure to replace `/path/to/...` with the absolute path to the generated JAR file.
 
+## Configuration (OpenCode)
+
+Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "jadx": {
+      "type": "local",
+      "command": ["java", "-jar", "/path/to/jadx_headless_mcp/build/libs/jadx-headless-mcp-all.jar"],
+      "enabled": true
+    }
+  }
+}
+```
+
 ## Available MCP Tools
 
 | Tool | Description |
@@ -97,8 +113,6 @@ Make sure to replace `/path/to/...` with the absolute path to the generated JAR 
 | `get_resource_strings` | Paginated retrieval of key-value pairs from `res/values/strings.xml`. |
 | `get_all_resource_file_names` | Retrieve a paginated list of all resource file names inside the APK. |
 | `get_resource_file` | Retrieve the decoded content of a specific resource file. |
-| `list_native_libraries` | List `.so` files inside the APK. |
-| `extract_native_library` | Extract a `.so` to `REVOID_OUTPUT_ROOT/native/` and return its path; open it with `ghidra-headless-mcp`'s `load_binary`. |
 
 ## Logging
 
@@ -112,7 +126,7 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 
 | Variable | Purpose |
 |----------|---------|
-| `REVOID_OUTPUT_ROOT` | Folder `save_project` and `extract_native_library` may write to (default `~/.revoid_output`) |
+| `REVOID_OUTPUT_ROOT` | Folder `save_project` may write to (default `~/.revoid_output`) |
 | `REVOID_AUTOSAVE` | Edits are saved after every change to `<apk name>.jadx` in the output root and restored on the next `load_apk` of the same APK. Set a path to save elsewhere, `0` to disable |
 
 ## Releases
