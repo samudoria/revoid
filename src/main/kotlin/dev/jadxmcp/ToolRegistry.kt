@@ -22,13 +22,16 @@ fun registerTools(server: Server, engine: JadxEngine) {
     }
 
     server.addTool("load_apk",
-        "Load and analyze an APK/DEX file. Must be called first. Resets any edits.",
+        "Start loading an APK/DEX file in the background and return immediately; poll load_status until \"loaded\". Must be called first. Resets any edits.",
         mkSchema {
             required("apk_path"); prop("apk_path", "string", "Absolute path to APK/DEX file")
             prop("deobfuscation", "boolean", "Enable jadx deobfuscation (default false)")
         }
     ) { req ->
-        wrap { json.encodeToString(engine.loadApk(req.arguments.str("apk_path"), req.arguments.optBool("deobfuscation") ?: false)) }
+        wrap { json.encodeToString(engine.loadApkAsync(req.arguments.str("apk_path"), req.arguments.optBool("deobfuscation") ?: false)) }
+    }
+    server.addTool("load_status", "Progress of load_apk: idle, loading, loaded (with class count) or error.", mkSchema {}) { _ ->
+        wrap { json.encodeToString(engine.loadStatus()) }
     }
 
     server.addTool("list_classes",

@@ -71,6 +71,28 @@ class JadxEngine {
 
     val isLoaded: Boolean get() = decompiler != null
 
+    @Volatile private var loader: Thread? = null
+    @Volatile private var loadError: String? = null
+
+    /** Starts loadApk on a background thread so a big APK can't block the MCP connection; poll [loadStatus]. */
+    @Synchronized
+    fun loadApkAsync(path: String, deobfuscation: Boolean = false): Map<String, String> {
+        check(loader == null) { "An APK is already loading; poll load_status." }
+        require(File(path).isFile) { "File not found: $path" }
+        loadError = null
+        loader = Thread {
+            try { loadApk(path, deobfuscation) } catch (e: Throwable) { loadError = e.toString(); log.error("Load failed", e) } finally { loader = null }
+        }.apply { isDaemon = true; start() }
+        return mapOf("status" to "loading", "hint" to "Poll load_status until it reports loaded.")
+    }
+
+    fun loadStatus(): Map<String, String> = when {
+        loader != null -> mapOf("status" to "loading")
+        loadError != null -> mapOf("status" to "error", "error" to loadError!!)
+        decompiler != null -> mapOf("status" to "loaded", "apkId" to currentApkId!!, "classCount" to classIndex.size.toString())
+        else -> mapOf("status" to "idle")
+    }
+
     // ── Loading ──────────────────────────────────────────────
 
     fun loadApk(path: String, deobfuscation: Boolean = false): ApkInfo {
@@ -721,6 +743,7 @@ class JadxEngine {
     // ── Name resolution ──────────────────────────────────────
 
     private fun ensureLoaded() {
+        check(loader == null || loader === Thread.currentThread()) { "APK is still loading; poll load_status." }
         checkNotNull(decompiler) { "No APK loaded. Call load_apk first." }
     }
 

@@ -1,3 +1,5 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+
 plugins {
     kotlin("jvm") version "2.3.21"
     kotlin("plugin.serialization") version "2.3.21"
@@ -6,7 +8,7 @@ plugins {
 }
 
 group = "dev.jadxmcp"
-version = "1.0.2"
+version = "1.1.0"
 
 repositories {
     mavenCentral()
@@ -14,8 +16,11 @@ repositories {
 }
 
 dependencies {
-    // MCP Kotlin SDK (STDIO server)
+    // MCP Kotlin SDK (STDIO + SSE server). Pulls in ktor-server-core/sse transitively.
     implementation("io.modelcontextprotocol:kotlin-sdk:0.13.0")
+
+    // Ktor engine for the SSE build (Netty: supports HTTPS; rest of ktor is transitive via the SDK)
+    implementation("io.ktor:ktor-server-netty:3.4.3")
 
     // JADX core — headless decompiler
     implementation("io.github.skylot:jadx-core:1.5.1")
@@ -51,6 +56,7 @@ application {
     mainClass.set("dev.jadxmcp.MainKt")
 }
 
+// STDIO build (default): jadx-headless-mcp-all.jar
 tasks.shadowJar {
     archiveBaseName.set("jadx-headless-mcp")
     archiveClassifier.set("all")
@@ -60,6 +66,21 @@ tasks.shadowJar {
         attributes("Main-Class" to "dev.jadxmcp.MainKt")
     }
 }
+
+// SSE/HTTP build: jadx-headless-mcp-sse-all.jar
+val sseJar by tasks.registering(ShadowJar::class) {
+    archiveBaseName.set("jadx-headless-mcp-sse")
+    archiveClassifier.set("all")
+    archiveVersion.set("")
+    mergeServiceFiles()
+    from(sourceSets.main.get().output)
+    configurations = listOf(project.configurations.runtimeClasspath.get())
+    manifest {
+        attributes("Main-Class" to "dev.jadxmcp.SseMainKt")
+    }
+}
+
+tasks.assemble { dependsOn(sseJar) }
 
 kotlin {
     jvmToolchain(21)

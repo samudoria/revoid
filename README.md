@@ -23,11 +23,38 @@ Unlike UI-based decompiler tools, this server is designed specifically for Large
 Ensure you have Java 21+ and Gradle installed.
 
 ```bash
-# Build the fat JAR containing all dependencies
-./gradlew shadowJar
+# Build both fat JARs containing all dependencies
+./gradlew shadowJar sseJar
 ```
 
-The compiled JAR will be located at `build/libs/jadx-headless-mcp-all.jar`.
+Two builds are produced in `build/libs/`:
+
+- `jadx-headless-mcp-all.jar` — **STDIO** transport (default; for Claude Desktop, OpenCode, etc.).
+- `jadx-headless-mcp-sse-all.jar` — **HTTP/SSE** transport, with optional HTTPS.
+
+## HTTP/SSE server
+
+Run the SSE build to serve MCP over the network:
+
+```bash
+java -jar build/libs/jadx-headless-mcp-sse-all.jar
+```
+
+It listens on `http://0.0.0.0:3000/` by default. Point an SSE MCP client at that base URL.
+
+| Variable | Purpose |
+|----------|---------|
+| `REVOID_HOST` / `REVOID_PORT` | Bind address (default `0.0.0.0`) and port (default `3000`) |
+| `REVOID_TLS_KEYSTORE` | Path to a PKCS12/JKS keystore. Set it to serve **HTTPS** instead of HTTP |
+| `REVOID_TLS_PASSWORD` | Keystore/key password (required with `REVOID_TLS_KEYSTORE`) |
+| `REVOID_TLS_ALIAS` | Key alias in the keystore (default `revoid`) |
+| `REVOID_ALLOWED_HOSTS` | Comma-separated `Host`-header allowlist (DNS-rebinding protection). Unset = accept any host |
+
+```bash
+# HTTPS example
+REVOID_TLS_KEYSTORE=/path/revoid.p12 REVOID_TLS_PASSWORD=secret \
+  java -jar build/libs/jadx-headless-mcp-sse-all.jar
+```
 
 ## Testing
 
@@ -68,18 +95,22 @@ Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/o
   "mcp": {
     "jadx": {
       "type": "local",
-      "command": ["java", "-jar", "/path/to/jadx_headless_mcp/build/libs/jadx-headless-mcp-all.jar"],
-      "enabled": true
+      "command": ["java", "-Xmx6g", "-jar", "/path/to/jadx_headless_mcp/build/libs/jadx-headless-mcp-all.jar"],
+      "enabled": true,
+      "timeout": 300000
     }
   }
 }
 ```
 
+`-Xmx` matters for large APKs (the JVM default is a quarter of RAM), and `timeout` (ms) is the MCP request timeout.
+
 ## Available MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `load_apk` | Load and analyze an APK/DEX file. **Must be called first.** |
+| `load_apk` | Start loading an APK/DEX file in the background. **Must be called first.** Returns immediately. |
+| `load_status` | Report `idle`, `loading`, `loaded` (with class count) or `error`. Poll after `load_apk`. |
 | `list_classes` | List all decompiled classes, optionally filtered by package prefix. |
 | `get_class_source` | Get the full decompiled Java source code of a class. |
 | `list_methods` | List all methods in a class with signatures and access modifiers. |
@@ -131,4 +162,4 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 
 ## Releases
 
-Pushing a tag like `v1.1.0` runs `.github/workflows/release.yml`, which tests, builds the fat JAR and attaches `revoid-<tag>.jar` to a GitHub release. Run it with `java -jar revoid-<tag>.jar`.
+Pushing a tag like `v1.1.0` runs `.github/workflows/release.yml`, which tests, builds both fat JARs and attaches them to a GitHub release: `revoid-<tag>.jar` (STDIO) and `revoid-sse-<tag>.jar` (HTTP/SSE).

@@ -22,10 +22,12 @@ jobs:
         run: |
           ./test-app/build.sh
           REVOID_OUTPUT_ROOT="$RUNNER_TEMP/out" ./gradlew test
-      - name: Build fat JAR
-        run: ./gradlew shadowJar
-      - name: Name artifact after the tag
-        run: cp build/libs/jadx-headless-mcp-all.jar "revoid-${GITHUB_REF_NAME}.jar"
+      - name: Build fat JARs (STDIO + SSE)
+        run: ./gradlew shadowJar sseJar
+      - name: Name artifacts after the tag
+        run: |
+          cp build/libs/jadx-headless-mcp-all.jar "revoid-${GITHUB_REF_NAME}.jar"
+          cp build/libs/jadx-headless-mcp-sse-all.jar "revoid-sse-${GITHUB_REF_NAME}.jar"
         if: startsWith(github.ref, 'refs/tags/')
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
@@ -35,5 +37,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         with:
-          name: revoid-jar
-          path: build/libs/jadx-headless-mcp-all.jar
+          name: revoid-jars
+          path: build/libs/jadx-headless-mcp*-all.jar
