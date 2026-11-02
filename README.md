@@ -160,6 +160,7 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 | `REVOID_OUTPUT_ROOT` | Folder `save_project` may write to (default `~/.revoid_output`) |
 | `REVOID_AUTOSAVE` | Edits are saved after every change to `<apk name>.jadx` in the output root and restored on the next `revoid_load_app` of the same APK. Set a path to save elsewhere, `0` to disable |
 
+
 ## Releases
 
 Pushing a tag like `v1.1.0` runs `.github/workflows/release.yml`, which tests, builds both fat JARs and attaches them to a GitHub release: `revoid-<tag>.jar` (STDIO) and `revoid-sse-<tag>.jar` (HTTP/SSE).
