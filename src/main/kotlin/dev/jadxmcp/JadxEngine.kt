@@ -256,6 +256,23 @@ class JadxEngine {
         return findClass(className).smali ?: "// Smali generation failed or unsupported."
     }
 
+    /** Smali `.method` declaration lines (access flags + name + descriptor) for every method in the class. */
+    fun getSmaliMethodSignatures(className: String): List<String> {
+        ensureLoaded()
+        val smali = findClass(className).smali ?: return emptyList()
+        return smali.lines().map { it.trim() }
+            .filter { it.startsWith(".method ") }
+            .map { it.removePrefix(".method ") }
+    }
+
+    /** Import lines from the class's decompiled source (fully-qualified; `static` kept, `;` stripped). */
+    fun getClassImports(className: String): List<String> {
+        ensureLoaded()
+        return getCachedSource(findClass(className)).lines().map { it.trim() }
+            .filter { it.startsWith("import ") }
+            .map { it.removePrefix("import ").removeSuffix(";").trim() }
+    }
+
     fun searchMethodByName(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedMethods {
         ensureLoaded()
         val match = matcher(query, isRegex)
@@ -744,7 +761,7 @@ class JadxEngine {
 
     private fun ensureLoaded() {
         check(loader == null || loader === Thread.currentThread()) { "APK is still loading; poll load_status." }
-        checkNotNull(decompiler) { "No APK loaded. Call load_apk first." }
+        checkNotNull(decompiler) { "No APK loaded. Call revoid_load_app first." }
     }
 
     /** Exact lookup by raw name, current display name, or earlier display name. Fuzzy only if asked. */

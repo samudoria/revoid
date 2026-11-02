@@ -3,7 +3,7 @@ package dev.jadxmcp
 import kotlinx.serialization.Serializable
 
 /**
- * Response from load_apk tool.
+ * Response from revoid_load_app tool.
  */
 @Serializable
 data class ApkInfo(

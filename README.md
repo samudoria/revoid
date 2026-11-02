@@ -109,14 +109,14 @@ Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/o
 
 | Tool | Description |
 |------|-------------|
-| `load_apk` | Start loading an APK/DEX file in the background. **Must be called first.** Returns immediately. |
-| `load_status` | Report `idle`, `loading`, `loaded` (with class count) or `error`. Poll after `load_apk`. |
+| `revoid_load_app` | Start loading an APK/DEX file in the background. **Must be called first.** Returns immediately. |
+| `load_status` | Report `idle`, `loading`, `loaded` (with class count) or `error`. Poll after `revoid_load_app`. |
 | `list_classes` | List all decompiled classes, optionally filtered by package prefix. |
-| `get_class_source` | Get the full decompiled Java source code of a class. |
+| `get_class_imports` | List the import statements (fully-qualified type names) from a class's source. |
 | `list_methods` | List all methods in a class with signatures and access modifiers. |
 | `get_method_source` | Get the decompiled source code of a specific method. |
 | `get_fields_of_class` | List all fields in a class with their types and access modifiers. |
-| `get_smali_of_class` | Fetch the disassembled Dalvik bytecode (Smali) of a class. |
+| `get_smali_method_signatures` | List the smali method signatures (access flags + name + descriptor) of a class. |
 | `get_class_summary` | Get a structured summary (superclass, interfaces, component type). |
 | `search_classes` | Search for classes by name using substring or regex matching. |
 | `search_classes_by_keyword` | Search for classes whose source code contains a specific keyword. |
@@ -158,7 +158,7 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 | Variable | Purpose |
 |----------|---------|
 | `REVOID_OUTPUT_ROOT` | Folder `save_project` may write to (default `~/.revoid_output`) |
-| `REVOID_AUTOSAVE` | Edits are saved after every change to `<apk name>.jadx` in the output root and restored on the next `load_apk` of the same APK. Set a path to save elsewhere, `0` to disable |
+| `REVOID_AUTOSAVE` | Edits are saved after every change to `<apk name>.jadx` in the output root and restored on the next `revoid_load_app` of the same APK. Set a path to save elsewhere, `0` to disable |
 
 ## Releases
 

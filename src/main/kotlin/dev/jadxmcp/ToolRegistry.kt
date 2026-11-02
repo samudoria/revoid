@@ -21,7 +21,7 @@ fun registerTools(server: Server, engine: JadxEngine) {
         wrap { json.encodeToString(engine.serverInfo()) }
     }
 
-    server.addTool("load_apk",
+    server.addTool("revoid_load_app",
         "Start loading an APK/DEX file in the background and return immediately; poll load_status until \"loaded\". Must be called first. Resets any edits.",
         mkSchema {
             required("apk_path"); prop("apk_path", "string", "Absolute path to APK/DEX file")
@@ -30,7 +30,7 @@ fun registerTools(server: Server, engine: JadxEngine) {
     ) { req ->
         wrap { json.encodeToString(engine.loadApkAsync(req.arguments.str("apk_path"), req.arguments.optBool("deobfuscation") ?: false)) }
     }
-    server.addTool("load_status", "Progress of load_apk: idle, loading, loaded (with class count) or error.", mkSchema {}) { _ ->
+    server.addTool("load_status", "Progress of revoid_load_app: idle, loading, loaded (with class count) or error.", mkSchema {}) { _ ->
         wrap { json.encodeToString(engine.loadStatus()) }
     }
 
@@ -41,20 +41,11 @@ fun registerTools(server: Server, engine: JadxEngine) {
         wrap { json.encodeToString(engine.listClasses(req.arguments.optStr("filter"), req.arguments.lim(), req.arguments.off())) }
     }
 
-    server.addTool("get_class_source",
-        "Get decompiled Java source of a class (an inner class returns its top-level class's source). Output is capped; use start_line/end_line to page.",
-        mkSchema {
-            required("class_name"); prop("class_name", "string", "Class name: raw (a.b.Outer\$Inner) or current/earlier display name; exact match")
-            prop("start_line", "integer", "First line (1-based)"); prop("end_line", "integer", "Last line (inclusive)")
-            prop("line_numbers", "boolean", "Prefix lines with numbers (default false)")
-            prop("max_chars", "integer", "Size cap in characters (default ${JadxEngine.DEFAULT_MAX_CHARS})")
-        }
+    server.addTool("get_class_imports",
+        "List the import statements from a class's decompiled source (fully-qualified type names).",
+        mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)") }
     ) { req ->
-        val a = req.arguments
-        wrap {
-            engine.getClassSource(a.str("class_name"), a.optInt("start_line"), a.optInt("end_line"),
-                a.optBool("line_numbers") ?: false, a.optInt("max_chars") ?: JadxEngine.DEFAULT_MAX_CHARS)
-        }
+        wrap { json.encodeToString(engine.getClassImports(req.arguments.str("class_name"))) }
     }
 
     server.addTool("list_methods",
@@ -124,8 +115,9 @@ fun registerTools(server: Server, engine: JadxEngine) {
     server.addTool("get_fields_of_class", "List fields in a class", mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)") }) { req ->
         wrap { json.encodeToString(engine.getFieldsOfClass(req.arguments.str("class_name"))) }
     }
-    server.addTool("get_smali_of_class", "Fetch smali of class", mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)") }) { req ->
-        wrap { engine.getSmaliOfClass(req.arguments.str("class_name")) }
+    server.addTool("get_smali_method_signatures", "List the smali method signatures (access flags + name + descriptor) of every method in a class.",
+        mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)") }) { req ->
+        wrap { json.encodeToString(engine.getSmaliMethodSignatures(req.arguments.str("class_name"))) }
     }
 
     // ── Live editing ──
