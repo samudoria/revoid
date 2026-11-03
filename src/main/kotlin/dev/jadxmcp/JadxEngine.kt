@@ -51,6 +51,7 @@ class JadxEngine {
     private var decompiler: JadxDecompiler? = null
     var currentApkPath: String? = null
     private var currentApkId: String? = null
+    private var currentDeobfuscation: Boolean = false
 
     // ── Indexes ──────────────────────────────────────────────
     private val classIndex = ConcurrentHashMap<String, JavaClass>()   // raw name → class (inner included)
@@ -100,6 +101,12 @@ class JadxEngine {
         require(file.exists()) { "File not found: $path" }
         require(file.isFile) { "Not a file: $path" }
 
+        // Cache: same APK already loaded this session → reuse it instead of re-decompiling.
+        if (decompiler != null && currentApkPath == path && currentDeobfuscation == deobfuscation) {
+            log.info("APK already loaded this session, reusing: {}", path)
+            return currentApkInfo()
+        }
+
         close()
         log.info("Loading APK: {}", path)
 
@@ -119,20 +126,23 @@ class JadxEngine {
         decompiler = jadx
         currentApkPath = path
         currentApkId = file.nameWithoutExtension
+        currentDeobfuscation = deobfuscation
         buildIndexes(jadx)
 
         log.info("Loaded {} classes from {}", classIndex.size, path)
         autosavePath()?.takeIf { File(it).isFile }?.let { p ->
             try { loadProject(p); log.info("Restored edits from {}", p) } catch (e: Exception) { log.warn("Could not restore {}: {}", p, e.message) }
         }
-        return ApkInfo(
-            status = "loaded",
-            apkId = currentApkId!!,
-            apkPath = path,
-            classCount = classIndex.size,
-            packageName = guessPackageName(),
-        )
+        return currentApkInfo()
     }
+
+    private fun currentApkInfo() = ApkInfo(
+        status = "loaded",
+        apkId = currentApkId!!,
+        apkPath = currentApkPath!!,
+        classCount = classIndex.size,
+        packageName = guessPackageName(),
+    )
 
     fun serverInfo() = ServerInfo(
         revoidVersion = REVOID_VERSION,
@@ -980,6 +990,7 @@ class JadxEngine {
         decompiler = null
         currentApkPath = null
         currentApkId = null
+        currentDeobfuscation = false
         clearIndexes()
     }
 
