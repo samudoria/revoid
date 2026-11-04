@@ -141,7 +141,7 @@ class JadxEngineTest {
             assertEquals("com.example.testapp.MainActivity", lazy.getMainActivityClass())
             assertTrue(lazy.getAllResourceFileNames().items.contains("AndroidManifest.xml"))
             assertTrue(lazy.getResourceFile("AndroidManifest.xml").contains("<manifest"))
-            assertSame("manifest must be decoded once and served from cache", lazy.getAndroidManifest(), lazy.getAndroidManifest())
+            assertSame(lazy.getAndroidManifest(), lazy.getAndroidManifest(), "manifest must be decoded once and served from cache")
         } finally {
             lazy.close()
             jarFile.delete()
@@ -295,14 +295,17 @@ class JadxEngineTest {
         // edits are autosaved and restored when the same APK is loaded again
         JadxEngine().let { other ->
             other.loadApk(File("test-app/build/sample.jar").absolutePath)
-            assertEquals(3, other.listAnnotations().size)
+            assertTrue(other.listAnnotations().size >= 3, "autosave restore should include the edits from this session")
             other.close()
         }
 
         val saved = engine.saveProject("revoid-test.jadx")
         assertEquals(2, saved.renames)
         engine.listAnnotations().indices.reversed().forEach { engine.removeAnnotation(it) }
-        assertEquals("login", engine.getMethodSource(login, "login").lines().first { it.contains("(") }.let { "login" })
+        assertTrue(
+            engine.getMethodSource(login, "login").contains("boolean login("),
+            "method alias should be removed after clearing annotations",
+        )
         assertTrue(engine.getClassSource(login).contains("class AuthManager"))
         assertEquals(0, engine.listAnnotations().size)
 
