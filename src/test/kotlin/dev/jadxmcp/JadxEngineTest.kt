@@ -116,13 +116,13 @@ class JadxEngineTest {
         jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
         try {
             lazy.loadApk(jarFile.absolutePath)
-            assertEquals("loading must not decompile any class", 0, lazy.decompileCount())
+            assertEquals(0, lazy.decompileCount(), "loading must not decompile any class")
             assertTrue(lazy.listClasses(limit = 1000).items.isNotEmpty())
-            assertEquals("listing classes must not decompile", 0, lazy.decompileCount())
+            assertEquals(0, lazy.decompileCount(), "listing classes must not decompile")
             lazy.getClassSource(crypto)
-            assertEquals("reading source must decompile exactly one class", 1, lazy.decompileCount())
+            assertEquals(1, lazy.decompileCount(), "reading source must decompile exactly one class")
             lazy.getClassSource(crypto)
-            assertEquals("second read must come from cache", 1, lazy.decompileCount())
+            assertEquals(1, lazy.decompileCount(), "second read must come from cache")
         } finally {
             lazy.close()
             jarFile.delete()
@@ -157,21 +157,21 @@ class JadxEngineTest {
         val jarFile = File("test-app/build/sample-warm.jar")
         jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
         try {
-            val first = JadxEngine(cacheRoot = cacheDir)
+            val first = JadxEngine(cacheRootOverride = cacheDir)
             try {
                 first.loadApk(jarFile.absolutePath)
                 first.getClassSource(crypto)
-                assertEquals("cold session must decompile the one requested class", 1, first.decompileCount())
+                assertEquals(1, first.decompileCount(), "cold session must decompile the one requested class")
             } finally {
                 first.close()
             }
 
-            val second = JadxEngine(cacheRoot = cacheDir)
+            val second = JadxEngine(cacheRootOverride = cacheDir)
             try {
                 second.loadApk(jarFile.absolutePath)
-                assertEquals("warm load must not decompile anything", 0, second.decompileCount())
+                assertEquals(0, second.decompileCount(), "warm load must not decompile anything")
                 second.getClassSource(crypto)
-                assertEquals("source must be served from the disk cache", 0, second.decompileCount())
+                assertEquals(0, second.decompileCount(), "source must be served from the disk cache")
             } finally {
                 second.close()
             }
