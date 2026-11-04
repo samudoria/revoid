@@ -189,6 +189,11 @@ class JadxEngine(
         loadStartedAt = System.currentTimeMillis()
         loadProgress = 0.05
         loadError = null
+        // Register this thread as the loader so ensureLoaded() lets our own restore/prime steps
+        // through while state is LOADING (the async path already set this to its worker thread,
+        // which is this same thread; a direct synchronous loadApk would otherwise self-block).
+        val prevLoader = loader
+        loader = Thread.currentThread()
         if (loadGateMs > 0) Thread.sleep(loadGateMs)
         close()
         log.info("Loading APK: {} (sha256 {})", path, hash)
@@ -235,6 +240,8 @@ class JadxEngine(
             loadError = e.toString()
             loadState = LoadState.ERROR
             throw e
+        } finally {
+            loader = prevLoader
         }
     }
 
