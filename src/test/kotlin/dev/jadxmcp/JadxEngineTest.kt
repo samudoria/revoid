@@ -109,8 +109,9 @@ class JadxEngineTest {
 
     @Test
     fun testLazyLoadDoesNotDecompile() {
-        // Use a distinct jar name so no autosave edits exist for it: load must only parse raw nodes.
-        val lazy = JadxEngine()
+        // Use a distinct jar name so no autosave edits exist for it, and disable the disk cache
+        // so this is a guaranteed cold load: loading must only parse raw nodes.
+        val lazy = JadxEngine(diskCacheEnabled = false)
         val jarFile = File("test-app/build/sample-lazy.jar")
         jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
         try {
@@ -132,7 +133,7 @@ class JadxEngineTest {
     fun testResourcesLazyAndManifestPrimed() {
         // isSkipResources=true: only the manifest is decoded eagerly at load (primed into the cache);
         // every other resource is decoded on demand via loadContent when a tool asks for it.
-        val lazy = JadxEngine()
+        val lazy = JadxEngine(diskCacheEnabled = false)
         val jarFile = File("test-app/build/sample-res.jar")
         jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
         try {
@@ -144,6 +145,39 @@ class JadxEngineTest {
         } finally {
             lazy.close()
             jarFile.delete()
+        }
+    }
+
+    @Test
+    fun testWarmDiskCacheSkipsDecompile() {
+        // A fresh cache dir makes the first session a guaranteed cold load. After it decompiles one
+        // class and closes (flushing the disk cache), the second session must serve source from disk
+        // without re-decompiling anything — proven via the decompile counter, not timing.
+        val cacheDir = java.nio.file.Files.createTempDirectory("revoid-warm-test").toFile()
+        val jarFile = File("test-app/build/sample-warm.jar")
+        jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
+        try {
+            val first = JadxEngine(cacheRoot = cacheDir)
+            try {
+                first.loadApk(jarFile.absolutePath)
+                first.getClassSource(crypto)
+                assertEquals("cold session must decompile the one requested class", 1, first.decompileCount())
+            } finally {
+                first.close()
+            }
+
+            val second = JadxEngine(cacheRoot = cacheDir)
+            try {
+                second.loadApk(jarFile.absolutePath)
+                assertEquals("warm load must not decompile anything", 0, second.decompileCount())
+                second.getClassSource(crypto)
+                assertEquals("source must be served from the disk cache", 0, second.decompileCount())
+            } finally {
+                second.close()
+            }
+        } finally {
+            jarFile.delete()
+            cacheDir.deleteRecursively()
         }
     }
 

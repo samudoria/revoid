@@ -11,7 +11,12 @@
   slow `RootNode.processResources`; the `ResourceFile` list is still built lazily via
   `JadxDecompiler.getResources()` and content is decoded per-file via `loadContent`); manifest
   is primed eagerly at load and cached (`manifestCache`); resource-lazy test added.
-- Phase 3 / 4 — pending.
+- **Phase 3** (disk cache) — implemented: in-session reuse keyed by APK sha256; cross-session
+  disk cache under `REVOID_CACHE_DIR` (default `<tmp>/revoid-cache`, per-hash `sources.json`)
+  with TTL (`REVOID_CACHE_TTL_HOURS`, 24h) and size/age cleanup (`REVOID_CACHE_MAX_MB`, 1GB);
+  reuses the existing autosave `save_project`/`load_project` machinery for edits; `close()`/
+  `clearIndexes()` never wipe the disk cache; warm-cache test uses the decompile counter.
+- Phase 4 — pending.
 
 ## Problem
 

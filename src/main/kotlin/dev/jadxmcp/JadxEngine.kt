@@ -48,13 +48,20 @@ import org.xml.sax.InputSource
  * `rawDeclClass#shortId`. Display names change on rename; lookups accept raw name, current
  * display name, and any earlier display name seen in this session.
  */
-class JadxEngine {
+class JadxEngine(
+    /** Set false to skip the cross-session disk cache (tests that need a guaranteed cold load). */
+    private val diskCacheEnabled: Boolean = true,
+    /** Test hook: override REVOID_CACHE_DIR so a test can use an isolated, fresh cache dir. */
+    private val cacheRootOverride: File? = null,
+) {
 
     private val log = LoggerFactory.getLogger(JadxEngine::class.java)
 
     private var decompiler: JadxDecompiler? = null
     var currentApkPath: String? = null
     private var currentApkId: String? = null
+    /** sha256 of the loaded APK; used as the in-session and disk cache key. */
+    private var currentApkHash: String? = null
 
     // ── Indexes ──────────────────────────────────────────────
     // Raw dex nodes only. Built cheaply at load — never triggers decompilation. Java*
@@ -113,14 +120,15 @@ class JadxEngine {
         require(file.exists()) { "File not found: $path" }
         require(file.isFile) { "Not a file: $path" }
 
-        // Cache: same APK already loaded this session → reuse it instead of re-decompiling.
-        if (decompiler != null && currentApkPath == path) {
-            log.info("APK already loaded this session, reusing: {}", path)
+        val hash = sha256(file)
+        // In-session cache: same content already loaded this session (path + sha256 key) → reuse it.
+        if (decompiler != null && currentApkHash == hash) {
+            log.info("APK already loaded this session (sha256 {}), reusing: {}", hash, path)
             return currentApkInfo()
         }
 
         close()
-        log.info("Loading APK: {}", path)
+        log.info("Loading APK: {} (sha256 {})", path, hash)
 
         val args = JadxArgs().apply {
             setInputFile(file)
@@ -140,9 +148,12 @@ class JadxEngine {
         decompiler = jadx
         currentApkPath = path
         currentApkId = file.nameWithoutExtension
+        currentApkHash = hash
         buildIndexes(jadx)
 
         log.info("Loaded {} classes from {}", classIndex.size, path)
+        // Warm disk cache: restore previously decompiled source so a reload never re-decompiles.
+        restoreDiskCache(hash)
         autosavePath()?.takeIf { File(it).isFile }?.let { p ->
             try { loadProject(p); log.info("Restored edits from {}", p) } catch (e: Exception) { log.warn("Could not restore {}: {}", p, e.message) }
         }
@@ -724,6 +735,108 @@ class JadxEngine {
     private fun autosave() {
         val path = autosavePath() ?: return
         try { saveProject(path) } catch (e: Exception) { log.warn("Autosave to {} failed: {}", path, e.message) }
+        flushDiskCache()
+    }
+
+    // ── Disk cache (Phase 3) ────────────────────────────────
+    // Cross-session cache of decompiled source, keyed by APK sha256, stored under
+    // REVOID_CACHE_DIR (default <tmp>/revoid-cache) as <hash>/sources.json. Loading restores
+    // the source cache so a warm reload never re-decompiles. close()/clearIndexes() only clear
+    // in-memory state and never wipe the disk cache. Entries expire after REVOID_CACHE_TTL_HOURS
+    // (default 24h) and the whole cache is bounded by REVOID_CACHE_MAX_MB (default 1024).
+
+    private fun sha256(file: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun cacheRoot(): File = cacheRootOverride
+        ?: File(System.getenv("REVOID_CACHE_DIR") ?: File(System.getProperty("java.io.tmpdir"), "revoid-cache").path)
+
+    private fun cacheFile(hash: String) = File(File(cacheRoot(), hash), "sources.json")
+
+    private fun cacheTtlMillis(): Long = (System.getenv("REVOID_CACHE_TTL_HOURS")?.toLongOrNull() ?: 24L) * 60 * 60 * 1000
+
+    private fun cacheMaxBytes(): Long = (System.getenv("REVOID_CACHE_MAX_MB")?.toLongOrNull() ?: 1024L) * 1024 * 1024
+
+    private fun savedAtOf(cacheDir: File): Long = runCatching {
+        Json.parseToJsonElement(File(cacheDir, "sources.json").readText()).jsonObject["savedAt"]?.jsonPrimitive?.longOrNull
+    }.getOrNull() ?: 0L
+
+    private fun dirSize(dir: File): Long = dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+
+    private fun cleanupDiskCache() {
+        val root = cacheRoot()
+        if (!root.isDirectory) return
+        val cutoff = System.currentTimeMillis() - cacheTtlMillis()
+        val dirs = root.listFiles { it.isDirectory } ?: return
+        for (dir in dirs) {
+            if (savedAtOf(dir) < cutoff) dir.deleteRecursively()
+        }
+        val remaining = dirs.filter { it.exists() }
+        val maxBytes = cacheMaxBytes()
+        var total = remaining.sumOf { dirSize(it) }
+        if (total > maxBytes) {
+            for (dir in remaining.sortedBy { savedAtOf(it) }) {
+                if (total <= maxBytes) break
+                total -= dirSize(dir)
+                dir.deleteRecursively()
+            }
+        }
+    }
+
+    /** Restore previously decompiled source from the disk cache into [sourceCache] (no re-decompile). */
+    private fun restoreDiskCache(hash: String) {
+        if (!diskCacheEnabled) return
+        cleanupDiskCache()
+        val file = cacheFile(hash)
+        if (!file.isFile) return
+        val stale = runCatching {
+            System.currentTimeMillis() - savedAtOf(file.parentFile) > cacheTtlMillis()
+        }.getOrDefault(true)
+        if (stale) { file.delete(); return }
+        try {
+            val sources = Json.parseToJsonElement(file.readText()).jsonObject["sources"]?.jsonObject ?: return
+            sources.forEach { (k, v) -> sourceCache[k] = v.jsonPrimitive.content }
+            log.info("Restored {} decompiled sources from disk cache ({})", sourceCache.size, hash)
+        } catch (e: Exception) {
+            log.warn("Could not restore disk cache {}: {}", file, e.message)
+        }
+    }
+
+    /** Persist the in-memory source cache for the current APK; never deletes existing cache entries. */
+    private fun flushDiskCache() {
+        if (!diskCacheEnabled) return
+        val hash = currentApkHash ?: return
+        if (sourceCache.isEmpty()) return
+        try {
+            val dir = File(cacheRoot(), hash).apply { mkdirs() }
+            val project = buildJsonObject {
+                put("apkHash", hash)
+                put("savedAt", System.currentTimeMillis())
+                putJsonObject("sources") {
+                    sourceCache.forEach { (k, v) -> put(k, v) }
+                }
+            }
+            val target = File(dir, "sources.json")
+            val tmp = File(dir, "sources.json.tmp")
+            tmp.writeText(Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), project))
+            target.delete()
+            if (!tmp.renameTo(target)) {
+                target.writeText(tmp.readText())
+                tmp.delete()
+            }
+        } catch (e: Exception) {
+            log.warn("Could not flush disk cache: {}", e.message)
+        }
     }
 
     private fun nodeRef(node: JavaNode): JadxNodeRef = JadxNodeRef.forJavaNode(node)!!
@@ -1029,10 +1142,12 @@ class JadxEngine {
             .groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
 
     fun close() {
+        flushDiskCache() // persist the source cache; the disk cache is never wiped here
         try { decompiler?.close() } catch (_: Exception) {}
         decompiler = null
         currentApkPath = null
         currentApkId = null
+        currentApkHash = null
         clearIndexes()
     }
 
