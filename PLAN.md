@@ -16,7 +16,12 @@
   with TTL (`REVOID_CACHE_TTL_HOURS`, 24h) and size/age cleanup (`REVOID_CACHE_MAX_MB`, 1GB);
   reuses the existing autosave `save_project`/`load_project` machinery for edits; `close()`/
   `clearIndexes()` never wipe the disk cache; warm-cache test uses the decompile counter.
-- Phase 4 — pending.
+- **Phase 4** (background load state machine) — implemented: `loadApkAsync` drives `idle → loading
+  → ready (+ error)`; `load_status` returns `state`/`progress`/`elapsed_s`; tools called while
+  loading throw `LoadingException`, which the tool layer converts to a soft
+  `{"status":"initializing","state":"loading","retry_after_s":N,"hint":...}` (never a hard
+  error); `get_server_info` reports `loadState`/`loadedApk`; background test uses a load gate.
+- **All phases done** — awaiting CI build via GitHub; final push + per-phase summary next.
 
 ## Problem
 

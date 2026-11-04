@@ -221,6 +221,15 @@ fun registerTools(server: Server, engine: JadxEngine) {
 
 private inline fun wrap(block: () -> String): CallToolResult = try {
     CallToolResult(content = listOf(TextContent(block())))
+} catch (e: LoadingException) {
+    // Soft "initializing" response instead of a hard error: the load is in progress, not failed.
+    // Agents should poll load_status and retry after retry_after_s seconds.
+    CallToolResult(content = listOf(TextContent(buildJsonObject {
+        put("status", "initializing")
+        put("state", e.state)
+        put("retry_after_s", e.retryAfterS)
+        put("hint", e.message)
+    }.toString())))
 } catch (e: IllegalArgumentException) {
     CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
 } catch (e: IllegalStateException) {

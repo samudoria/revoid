@@ -182,6 +182,42 @@ class JadxEngineTest {
     }
 
     @Test
+    fun testBackgroundLoadSoftStatus() {
+        // While a background load is in flight, load_status must report state/progress/elapsed_s and
+        // other tools must return a soft initializing signal (LoadingException), never a hard error.
+        val gated = JadxEngine(diskCacheEnabled = false)
+        val jarFile = File("test-app/build/sample-bg.jar")
+        jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
+        try {
+            gated.loadGateMs = 3000
+            gated.loadApkAsync(jarFile.absolutePath)
+
+            var status = gated.loadStatus()
+            val deadline = System.currentTimeMillis() + 5000
+            while (status["state"] != "loading" && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10)
+                status = gated.loadStatus()
+            }
+            assertEquals("loading", status["state"])
+            assertTrue(status.containsKey("progress"), "load_status must report progress")
+            assertTrue(status.containsKey("elapsed_s"), "load_status must report elapsed_s")
+
+            val ex = assertThrows(LoadingException::class.java) { gated.listClasses(limit = 1000) }
+            assertTrue(ex.message!!.contains("loading"), "hint should describe the loading state")
+
+            gated.loadGateMs = 0
+            val done = System.currentTimeMillis() + 10000
+            while (gated.loadStatus()["state"] != "ready" && System.currentTimeMillis() < done) Thread.sleep(20)
+            assertEquals("ready", gated.loadStatus()["state"])
+            assertTrue(gated.isLoaded)
+        } finally {
+            gated.loadGateMs = 0
+            gated.close()
+            jarFile.delete()
+        }
+    }
+
+    @Test
     fun testSearching() {
         assertTrue(engine.searchClasses("Crypto").items.any { it.rawName == crypto })
         assertTrue(engine.searchMethodByName("login").items.any { it.fullSignature.contains("AuthManager") })

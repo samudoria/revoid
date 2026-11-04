@@ -110,7 +110,8 @@ Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/o
 | Tool | Description |
 |------|-------------|
 | `revoid_load_app` | Start loading an APK/DEX file in the background. **Must be called first.** Returns immediately. |
-| `load_status` | Report `idle`, `loading`, `loaded` (with class count) or `error`. Poll after `revoid_load_app`. |
+| `load_status` | Load lifecycle: `state` = `idle`/`loading`/`ready`/`error`, plus `progress` (0..1), `elapsed_s`, and (when ready) `apkId`/`classCount`. Poll after `revoid_load_app`. |
+| `get_server_info` | Revoid/jadx versions, capabilities, and current `loadState`/`loadedApk`. |
 | `list_classes` | List all decompiled classes, optionally filtered by package prefix. |
 | `get_class_imports` | List the import statements (fully-qualified type names) from a class's source. |
 | `list_methods` | List all methods in a class with signatures and access modifiers. |
@@ -145,6 +146,18 @@ Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/o
 | `get_all_resource_file_names` | Retrieve a paginated list of all resource file names inside the APK. |
 | `get_resource_file` | Retrieve the decoded content of a specific resource file. |
 
+## Agent workflow
+
+1. Call `revoid_load_app` with the APK/DEX path. It returns immediately (`state: loading`);
+   the load runs in the background — only the dex is parsed and indexed, decompilation is lazy
+   (per class, on demand).
+2. Poll `load_status` until `state: ready`. While loading, every other tool returns a **soft**
+   `{"status":"initializing","state":"loading","retry_after_s":2,"hint":...}` instead of a hard
+   error, so you can simply retry after the suggested delay instead of treating it as a failure.
+3. Once `ready`, run analysis tools normally (`list_classes`, `get_class_summary`, `get_class_source`, …).
+   Source for a class is decompiled the first time you ask for it and cached; a repeat `revoid_load_app`
+   of the same APK restores the cached source from disk, so nothing is re-decompiled.
+
 ## Logging
 
 The server uses STDIO for MCP JSON-RPC communication. Therefore, all standard output (`stdout`) is reserved strictly for protocol messages. Diagnostic logs and jadx warnings are routed exclusively to standard error (`stderr`).
@@ -159,6 +172,9 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 |----------|---------|
 | `REVOID_OUTPUT_ROOT` | Folder `save_project` may write to (default `~/.revoid_output`) |
 | `REVOID_AUTOSAVE` | Edits are saved after every change to `<apk name>.jadx` in the output root and restored on the next `revoid_load_app` of the same APK. Set a path to save elsewhere, `0` to disable |
+| `REVOID_CACHE_DIR` | Cross-session cache of decompiled source, keyed by APK sha256 (default `<tmp>/revoid-cache`). Repeat loads of the same APK skip re-decompiling |
+| `REVOID_CACHE_TTL_HOURS` | How long a cache entry stays valid (default `24`) |
+| `REVOID_CACHE_MAX_MB` | Total cache size cap; oldest entries are evicted (default `1024`) |
 
 
 ## Releases

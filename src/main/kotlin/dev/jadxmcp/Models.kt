@@ -154,7 +154,14 @@ data class AnnotationInfo(
 data class ProjectResult(val path: String, val renames: Int, val comments: Int, val refreshedClasses: Int = 0)
 
 @Serializable
-data class ServerInfo(val revoidVersion: String, val jadxVersion: String, val capabilities: Map<String, Boolean>)
+data class ServerInfo(
+    val revoidVersion: String,
+    val jadxVersion: String,
+    val capabilities: Map<String, Boolean>,
+    /** Current load state: idle | loading | ready | error (see LoadState). */
+    val loadState: String = "idle",
+    val loadedApk: String? = null,
+)
 
 /**
  * Component from AndroidManifest.xml

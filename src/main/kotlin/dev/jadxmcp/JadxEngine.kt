@@ -41,6 +41,16 @@ import javax.xml.transform.dom.DOMSource
 import javax.xml.transform.stream.StreamResult
 import org.xml.sax.InputSource
 
+/** Load lifecycle state machine: idle → loading → ready (+ error). */
+enum class LoadState { IDLE, LOADING, READY, ERROR }
+
+/**
+ * Thrown by tools while the APK is still loading. Converted by the MCP tool layer into a soft
+ * `{"status":"initializing","state":"loading","retry_after_s":N,"hint":...}` response
+ * instead of a hard tool error, so agents can poll and retry.
+ */
+class LoadingException(message: String, val state: String = "loading", val retryAfterS: Int = 2) : IllegalStateException(message)
+
 /**
  * Headless analysis engine wrapping jadx-core.
  *
@@ -92,7 +102,13 @@ class JadxEngine(
     val isLoaded: Boolean get() = decompiler != null
 
     @Volatile private var loader: Thread? = null
+    @Volatile private var loadState: LoadState = LoadState.IDLE
     @Volatile private var loadError: String? = null
+    @Volatile private var loadProgress: Double = 0.0
+    @Volatile private var loadStartedAt: Long = 0
+    @Volatile private var loadFinishedAt: Long = 0
+    /** Test hook: if > 0 the loader thread sleeps this long after entering LOADING so tests can observe the loading state. */
+    @Volatile internal var loadGateMs: Long = 0
 
     /** Starts loadApk on a background thread so a big APK can't block the MCP connection; poll [loadStatus]. */
     @Synchronized
@@ -100,18 +116,51 @@ class JadxEngine(
         check(loader == null) { "An APK is already loading; poll load_status." }
         require(File(path).isFile) { "File not found: $path" }
         loadError = null
+        loadState = LoadState.LOADING
+        loadProgress = 0.0
+        loadStartedAt = System.currentTimeMillis()
         loader = Thread {
-            try { loadApk(path) } catch (e: Throwable) { loadError = e.toString(); log.error("Load failed", e) } finally { loader = null }
+            try {
+                loadApk(path)
+            } catch (e: Throwable) {
+                log.error("Load failed", e)
+                loadError = e.toString()
+                loadFinishedAt = System.currentTimeMillis()
+                loadState = LoadState.ERROR
+            } finally {
+                loader = null
+            }
         }.apply { isDaemon = true; start() }
-        return mapOf("status" to "loading", "hint" to "Poll load_status until it reports loaded.")
+        return mapOf("status" to "loading", "state" to "loading", "hint" to "Poll load_status until it reports loaded.")
     }
 
-    fun loadStatus(): Map<String, String> = when {
-        loader != null -> mapOf("status" to "loading")
-        loadError != null -> mapOf("status" to "error", "error" to loadError!!)
-        decompiler != null -> mapOf("status" to "loaded", "apkId" to currentApkId!!, "classCount" to classIndex.size.toString())
-        else -> mapOf("status" to "idle")
+    fun loadStatus(): Map<String, String> = when (loadState) {
+        LoadState.IDLE -> mapOf("state" to "idle", "status" to "idle")
+        LoadState.LOADING -> mapOf(
+            "state" to "loading",
+            "status" to "loading",
+            "progress" to "%.2f".format(loadProgress),
+            "elapsed_s" to elapsedLoadSeconds().toString(),
+            "hint" to "APK is loading; poll load_status until state=ready, or retry the tool shortly.",
+        )
+        LoadState.READY -> mapOf(
+            "state" to "ready",
+            "status" to "loaded",
+            "apkId" to (currentApkId ?: ""),
+            "classCount" to classIndex.size.toString(),
+            "elapsed_s" to elapsedLoadSeconds().toString(),
+        )
+        LoadState.ERROR -> mapOf(
+            "state" to "error",
+            "status" to "error",
+            "error" to (loadError ?: "Unknown error"),
+            "elapsed_s" to elapsedLoadSeconds().toString(),
+        )
     }
+
+    private fun elapsedLoadSeconds(): Long =
+        ((if (loadState == LoadState.LOADING) System.currentTimeMillis() else loadFinishedAt) - loadStartedAt)
+            .coerceAtLeast(0) / 1000
 
     // ── Loading ──────────────────────────────────────────────
 
@@ -124,42 +173,61 @@ class JadxEngine(
         // In-session cache: same content already loaded this session (path + sha256 key) → reuse it.
         if (decompiler != null && currentApkHash == hash) {
             log.info("APK already loaded this session (sha256 {}), reusing: {}", hash, path)
+            loadState = LoadState.READY
             return currentApkInfo()
         }
 
+        loadState = LoadState.LOADING
+        loadStartedAt = System.currentTimeMillis()
+        loadProgress = 0.05
+        loadError = null
+        if (loadGateMs > 0) Thread.sleep(loadGateMs)
         close()
         log.info("Loading APK: {} (sha256 {})", path, hash)
 
-        val args = JadxArgs().apply {
-            setInputFile(file)
-            threadsCount = Runtime.getRuntime().availableProcessors()
-            // Skip the eager resource-table processing: it is the slowest part of a full jadx load.
-            // The ResourceFile list is still built lazily on first resource tool access, and each
-            // file's content is decoded on demand (loadContent). The manifest is primed below.
-            isSkipResources = true
-            isShowInconsistentCode = true
-            isRespectBytecodeAccModifiers = true
-            codeData = JadxCodeData()
+        try {
+            val args = JadxArgs().apply {
+                setInputFile(file)
+                threadsCount = Runtime.getRuntime().availableProcessors()
+                // Skip the eager resource-table processing: it is the slowest part of a full jadx load.
+                // The ResourceFile list is still built lazily on first resource tool access, and each
+                // file's content is decoded on demand (loadContent). The manifest is primed below.
+                isSkipResources = true
+                isShowInconsistentCode = true
+                isRespectBytecodeAccModifiers = true
+                codeData = JadxCodeData()
+            }
+
+            val jadx = JadxDecompiler(args)
+            jadx.load()
+            loadProgress = 0.3
+
+            decompiler = jadx
+            currentApkPath = path
+            currentApkId = file.nameWithoutExtension
+            currentApkHash = hash
+            buildIndexes(jadx)
+            loadProgress = 0.6
+
+            log.info("Loaded {} classes from {}", classIndex.size, path)
+            // Warm disk cache: restore previously decompiled source so a reload never re-decompiles.
+            restoreDiskCache(hash)
+            loadProgress = 0.8
+            autosavePath()?.takeIf { File(it).isFile }?.let { p ->
+                try { loadProject(p); log.info("Restored edits from {}", p) } catch (e: Exception) { log.warn("Could not restore {}: {}", p, e.message) }
+            }
+            // Parse only the manifest eagerly (cheap, single XML decode); every other resource stays lazy.
+            try { getAndroidManifest() } catch (e: Exception) { log.warn("Could not prime manifest: {}", e.message) }
+            loadProgress = 1.0
+            loadFinishedAt = System.currentTimeMillis()
+            loadState = LoadState.READY
+            return currentApkInfo()
+        } catch (e: Throwable) {
+            loadFinishedAt = System.currentTimeMillis()
+            loadError = e.toString()
+            loadState = LoadState.ERROR
+            throw e
         }
-
-        val jadx = JadxDecompiler(args)
-        jadx.load()
-
-        decompiler = jadx
-        currentApkPath = path
-        currentApkId = file.nameWithoutExtension
-        currentApkHash = hash
-        buildIndexes(jadx)
-
-        log.info("Loaded {} classes from {}", classIndex.size, path)
-        // Warm disk cache: restore previously decompiled source so a reload never re-decompiles.
-        restoreDiskCache(hash)
-        autosavePath()?.takeIf { File(it).isFile }?.let { p ->
-            try { loadProject(p); log.info("Restored edits from {}", p) } catch (e: Exception) { log.warn("Could not restore {}: {}", p, e.message) }
-        }
-        // Parse only the manifest eagerly (cheap, single XML decode); every other resource stays lazy.
-        try { getAndroidManifest() } catch (e: Exception) { log.warn("Could not prime manifest: {}", e.message) }
-        return currentApkInfo()
     }
 
     private fun currentApkInfo() = ApkInfo(
@@ -174,6 +242,8 @@ class JadxEngine(
         revoidVersion = REVOID_VERSION,
         jadxVersion = JadxDecompiler.getVersion(),
         capabilities = mapOf("editing" to true, "pagination" to true),
+        loadState = loadState.name.lowercase(),
+        loadedApk = currentApkPath,
     )
 
     // ── Classes ──────────────────────────────────────────────
@@ -899,7 +969,15 @@ class JadxEngine(
     // ── Name resolution ──────────────────────────────────────
 
     private fun ensureLoaded() {
-        check(loader == null || loader === Thread.currentThread()) { "APK is still loading; poll load_status." }
+        // While a load is in progress (except on the loader thread itself) tools get a soft
+        // initializing signal instead of a hard error, so agents can poll load_status and retry.
+        if (loadState == LoadState.LOADING && loader !== Thread.currentThread()) {
+            throw LoadingException(
+                "APK is still loading (state=loading, elapsed ${elapsedLoadSeconds()}s); " +
+                    "poll load_status until state=ready, or retry in ~2s. " +
+                    "Decompiled source is produced lazily on demand."
+            )
+        }
         checkNotNull(decompiler) { "No APK loaded. Call revoid_load_app first." }
     }
 
