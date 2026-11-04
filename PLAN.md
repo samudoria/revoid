@@ -1,5 +1,12 @@
 # PLAN — Fast revoid APK load (lazy indexing, no eager decompile)
 
+## Status
+
+- **Phase 0** (plan + API verification) — done (`8ade84a`)
+- **Phase 1a** (raw-node index, lazy decompile) — implemented in `JadxEngine.kt`; not yet
+  built/verified locally (CI build; see note at bottom). Lazy test added in `JadxEngineTest.kt`.
+- Phase 1b / 2 / 3 / 4 — pending.
+
 ## Problem
 
 `JadxEngine.buildIndexes()` (JadxEngine.kt:842) walks `jadx.classes` and touches

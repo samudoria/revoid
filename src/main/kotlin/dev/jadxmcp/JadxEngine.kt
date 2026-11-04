@@ -17,9 +17,13 @@ import jadx.api.data.impl.JadxCodeData
 import jadx.api.data.impl.JadxCodeRef
 import jadx.api.data.impl.JadxCodeRename
 import jadx.api.data.impl.JadxNodeRef
+import jadx.core.dex.attributes.AFlag
 import jadx.core.dex.attributes.AType
 import jadx.core.dex.instructions.InsnType
 import jadx.core.dex.instructions.InvokeNode
+import jadx.core.dex.nodes.ClassNode
+import jadx.core.dex.nodes.FieldNode
+import jadx.core.dex.nodes.MethodNode
 import kotlinx.serialization.json.*
 import org.slf4j.LoggerFactory
 import org.w3c.dom.Element
@@ -54,9 +58,11 @@ class JadxEngine {
     private var currentDeobfuscation: Boolean = false
 
     // ── Indexes ──────────────────────────────────────────────
-    private val classIndex = ConcurrentHashMap<String, JavaClass>()   // raw name → class (inner included)
-    private val methodIndex = ConcurrentHashMap<String, JavaMethod>() // rawCls#shortId
-    private val fieldIndex = ConcurrentHashMap<String, JavaField>()   // rawCls#shortId
+    // Raw dex nodes only. Built cheaply at load — never triggers decompilation. Java*
+    // wrappers (and therefore decompiled source) are resolved lazily per node on tool access.
+    private val classIndex = ConcurrentHashMap<String, ClassNode>()   // raw name → class (inner included)
+    private val methodIndex = ConcurrentHashMap<String, MethodNode>() // rawCls#shortId
+    private val fieldIndex = ConcurrentHashMap<String, FieldNode>()   // rawCls#shortId
     private val displayIndex = ConcurrentHashMap<String, String>()    // current display name → raw
     private val oldClassNames = ConcurrentHashMap<String, String>()   // earlier display name → raw
     private val lastClassName = ConcurrentHashMap<String, String>()   // raw → last seen display name
@@ -65,6 +71,10 @@ class JadxEngine {
 
     // top-level raw class name → decompiled source
     private val sourceCache = ConcurrentHashMap<String, String>()
+
+    // How many top-level classes have been decompiled on demand (laziness signal for tests).
+    private val decompileCounter = java.util.concurrent.atomic.AtomicInteger()
+    internal fun decompileCount(): Int = decompileCounter.get()
 
     // ── User edits (mirrors jadx-gui code data) ──────────────
     private val renames = mutableListOf<ICodeRename>()
@@ -187,20 +197,19 @@ class JadxEngine {
 
     fun getClassSummary(className: String): ClassSummary {
         ensureLoaded()
-        val cls = findClass(className)
-        val classNode = cls.classNode
+        val classNode = findClassNode(className)
         return ClassSummary(
-            name = cls.fullName,
-            rawName = cls.rawName,
+            name = classNode.fullName,
+            rawName = classNode.rawName,
             superClass = classNode.superClass?.toString(),
             interfaces = classNode.interfaces?.map { it.toString() } ?: emptyList(),
-            methodCount = cls.methods.size,
-            fieldCount = cls.fields.size,
-            isActivity = isAndroidComponent(cls, "Activity"),
-            isService = isAndroidComponent(cls, "Service"),
-            isBroadcastReceiver = isAndroidComponent(cls, "BroadcastReceiver"),
-            isContentProvider = isAndroidComponent(cls, "ContentProvider"),
-            isFragment = isAndroidComponent(cls, "Fragment"),
+            methodCount = classNode.methods.size,
+            fieldCount = classNode.fields.size,
+            isActivity = isAndroidComponent(classNode, "Activity"),
+            isService = isAndroidComponent(classNode, "Service"),
+            isBroadcastReceiver = isAndroidComponent(classNode, "BroadcastReceiver"),
+            isContentProvider = isAndroidComponent(classNode, "ContentProvider"),
+            isFragment = isAndroidComponent(classNode, "Fragment"),
         )
     }
 
@@ -214,7 +223,7 @@ class JadxEngine {
     fun searchClassesByKeyword(keyword: String, limit: Int = 50, offset: Int = 0): PaginatedClasses {
         ensureLoaded()
         val lower = keyword.lowercase()
-        val all = classIndex.values.filter { !it.isInner && getCachedSource(it).lowercase().contains(lower) }
+        val all = classIndex.values.filter { !it.isInner && getCachedSource(javaClassOf(it)).lowercase().contains(lower) }
             .sortedBy { it.fullName }
         return pageClasses(all, limit, offset)
     }
@@ -223,7 +232,7 @@ class JadxEngine {
 
     fun listMethods(className: String, limit: Int = 50, offset: Int = 0): PaginatedMethods {
         ensureLoaded()
-        val methods = findClass(className).methods.map { methodInfo(it) }
+        val methods = findClassNode(className).methods.map { methodInfo(javaMethodOf(it)) }
         return PaginatedMethods(methods.page(limit, offset), methods.size, limit, offset)
     }
 
@@ -287,8 +296,8 @@ class JadxEngine {
         ensureLoaded()
         val match = matcher(query, isRegex)
         val methods = methodIndex.values
-            .filter { match(it.name) || match(it.methodNode.methodInfo.name) }
-            .map { methodInfo(it) }
+            .filter { match(it.alias) || match(it.methodInfo.name) }
+            .map { methodInfo(javaMethodOf(it)) }
             .sortedBy { it.fullSignature }
         return PaginatedMethods(methods.page(limit, offset), methods.size, limit, offset)
     }
@@ -306,7 +315,8 @@ class JadxEngine {
 
         for (cls in classIndex.values.sortedBy { it.rawName }) {
             try {
-                val source = getCachedSource(cls)
+                val jcls = javaClassOf(cls)
+                val source = getCachedSource(jcls)
                 if (!cls.isInner) {
                     for ((idx, line) in source.lines().withIndex()) {
                         if (!line.contains('"') || !line.lowercase().contains(lowerQuery)) continue
@@ -317,11 +327,11 @@ class JadxEngine {
                         }
                     }
                 }
-                val failed = cls.methods.filter { it.methodNode.contains(AType.JADX_ERROR) }
-                    .associateBy { it.methodNode.methodInfo.shortId }
+                val failed = cls.methods.filter { it.contains(AType.JADX_ERROR) }
+                    .associateBy { it.methodInfo.shortId }
                 if (failed.isNotEmpty()) {
                     var current: String? = null
-                    for ((idx, line) in (cls.smali ?: "").lines().withIndex()) {
+                    for ((idx, line) in (jcls.smali ?: "").lines().withIndex()) {
                         val t = line.trim()
                         if (t.startsWith(".method ")) current = t.substringAfterLast(' ')
                         else if (t == ".end method") current = null
@@ -480,7 +490,7 @@ class JadxEngine {
     fun xrefsToField(className: String, fieldName: String, limit: Int = 50, offset: Int = 0): PaginatedXrefs {
         ensureLoaded()
         val cls = findClass(className)
-        val field = fieldIndex[cls.rawName + "#" + fieldName]
+        val field = fieldIndex[cls.rawName + "#" + fieldName]?.let { javaFieldOf(it) }
             ?: cls.fields.find { memberNameMatches(fid(it), it.name, it.fieldNode.fieldInfo.name, fieldName) }
             ?: throw IllegalArgumentException("Field '$fieldName' not found in class '$className'")
         return xrefs(field.useIn, limit, offset)
@@ -510,7 +520,7 @@ class JadxEngine {
             val info = (insn as InvokeNode).callMth
             val id = info.declClass.rawName + "#" + info.shortId
             val known = methodIndex[id]
-            val sig = if (known != null) getMethodSignature(known) else {
+            val sig = if (known != null) getMethodSignature(javaMethodOf(known)) else {
                 val p = info.argumentsTypes?.joinToString(", ") ?: ""
                 "${info.declClass.fullName}.${info.alias}($p):${info.returnType ?: "void"}"
             }
@@ -715,9 +725,9 @@ class JadxEngine {
     private fun refInfo(r: IJavaNodeRef) = RefInfo(r.type.name, r.declaringClass, r.shortId)
 
     private fun nodeOfRef(r: IJavaNodeRef): JavaNode? = when (r.type) {
-        IJavaNodeRef.RefType.CLASS -> classIndex[r.declaringClass]
-        IJavaNodeRef.RefType.METHOD -> methodIndex[r.declaringClass + "#" + r.shortId]
-        IJavaNodeRef.RefType.FIELD -> fieldIndex[r.declaringClass + "#" + r.shortId]
+        IJavaNodeRef.RefType.CLASS -> classIndex[r.declaringClass]?.let { javaClassOf(it) }
+        IJavaNodeRef.RefType.METHOD -> methodIndex[r.declaringClass + "#" + r.shortId]?.let { javaMethodOf(it) }
+        IJavaNodeRef.RefType.FIELD -> fieldIndex[r.declaringClass + "#" + r.shortId]?.let { javaFieldOf(it) }
         else -> null
     }
 
@@ -753,8 +763,8 @@ class JadxEngine {
     private fun resolveMember(cls: JavaClass, member: String?): JavaNode {
         if (member.isNullOrBlank()) return cls
         val id = cls.rawName + "#" + member
-        methodIndex[id]?.let { return it }
-        fieldIndex[id]?.let { return it }
+        methodIndex[id]?.let { return javaMethodOf(it) }
+        fieldIndex[id]?.let { return javaFieldOf(it) }
         val found: List<JavaNode> =
             cls.methods.filter { nameMatches(it, member) } +
                 cls.fields.filter { memberNameMatches(fid(it), it.name, it.fieldNode.fieldInfo.name, member) }
@@ -774,8 +784,17 @@ class JadxEngine {
         checkNotNull(decompiler) { "No APK loaded. Call revoid_load_app first." }
     }
 
-    /** Exact lookup by raw name, current display name, or earlier display name. Fuzzy only if asked. */
-    private fun findClass(className: String, fuzzy: Boolean = false): JavaClass {
+    /**
+     * Lazy Java* wrapper resolution. [JadxDecompiler.getJavaNodeByRef] converts exactly one raw
+     * node into its JavaClass/JavaMethod/JavaField wrapper without decompiling it; the heavy
+     * decompilation only happens when source is actually requested (e.g. `.code`, `getCode()`).
+     */
+    private fun javaClassOf(c: ClassNode): JavaClass = decompiler!!.getJavaNodeByRef(c) as JavaClass
+    private fun javaMethodOf(m: MethodNode): JavaMethod = decompiler!!.getJavaNodeByRef(m) as JavaMethod
+    private fun javaFieldOf(f: FieldNode): JavaField = decompiler!!.getJavaNodeByRef(f) as JavaField
+
+    /** Exact raw lookup by raw name, current display name, or earlier display name. Fuzzy only if asked. */
+    private fun findClassNode(className: String, fuzzy: Boolean = false): ClassNode {
         for (n in listOf(className, className.replace('$', '.'))) {
             classIndex[n]?.let { return it }
             (displayIndex[n] ?: oldClassNames[n])?.let { return classIndex.getValue(it) }
@@ -793,6 +812,9 @@ class JadxEngine {
         throw IllegalArgumentException("Class '$className' not found (exact match required). $hint")
     }
 
+    private fun findClass(className: String, fuzzy: Boolean = false): JavaClass =
+        javaClassOf(findClassNode(className, fuzzy))
+
     private fun nameMatches(m: JavaMethod, name: String) =
         memberNameMatches(mid(m), m.name, m.methodNode.methodInfo.name, name)
 
@@ -809,13 +831,14 @@ class JadxEngine {
         } catch (e: IllegalArgumentException) {
             if (exact) throw e
             val s = sig.lowercase()
-            return methodIndex.values.filter { getMethodSignature(it).lowercase().contains(s) || mid(it).lowercase().contains(s) }
+            return methodIndex.values.map { javaMethodOf(it) }
+                .filter { getMethodSignature(it).lowercase().contains(s) || mid(it).lowercase().contains(s) }
                 .minByOrNull { getMethodSignature(it) } ?: throw e
         }
     }
 
     private fun resolveMethodExact(sig: String): JavaMethod {
-        methodIndex[sig]?.let { return it }
+        methodIndex[sig]?.let { return javaMethodOf(it) }
         if ('#' in sig) {
             val cls = findClass(sig.substringBefore('#'))
             return cls.searchMethodByShortId(sig.substringAfter('#'))
@@ -839,15 +862,22 @@ class JadxEngine {
         }
     }
 
+    /**
+     * Index the raw parsed model. Walks [RootNode] class nodes only — reading names, methods,
+     * fields and access info never triggers decompilation, so loading stays O(classes) and fast.
+     * Java* wrappers are resolved lazily per node on first tool access via [javaClassOf]/[javaMethodOf].
+     */
     private fun buildIndexes(jadx: JadxDecompiler) {
         clearIndexes()
-        fun add(cls: JavaClass) {
+        fun add(cls: ClassNode) {
             classIndex[cls.rawName] = cls
             cls.methods.forEach { methodIndex[mid(it)] = it }
             cls.fields.forEach { fieldIndex[fid(it)] = it }
             cls.innerClasses.forEach { add(it) }
         }
-        jadx.classes.forEach { add(it) }
+        jadx.root.classes
+            .filterNot { it.contains(AFlag.DONT_GENERATE) || it.isInner }
+            .forEach { add(it) }
         refreshNames()
         log.info("Indexed {} classes, {} methods", classIndex.size, methodIndex.size)
     }
@@ -865,8 +895,8 @@ class JadxEngine {
                 if (it != display) oldMemberNames.getOrPut(id) { ConcurrentHashMap.newKeySet() }.add(it)
             }
         }
-        methodIndex.forEach { (id, m) -> track(id, m.name) }
-        fieldIndex.forEach { (id, f) -> track(id, f.name) }
+        methodIndex.forEach { (id, m) -> track(id, m.alias) }
+        fieldIndex.forEach { (id, f) -> track(id, f.alias) }
     }
 
     private fun clearIndexes() {
@@ -879,7 +909,9 @@ class JadxEngine {
         val top = cls.topParentClass
         return sourceCache.getOrPut(top.rawName) {
             try {
-                top.code ?: "// Decompilation failed for ${top.fullName}"
+                val code = top.code
+                decompileCounter.incrementAndGet()
+                code ?: "// Decompilation failed for ${top.fullName}"
             } catch (e: Exception) {
                 log.warn("Decompilation failed for {}: {}", top.fullName, e.message)
                 "// Decompilation failed: ${e.message}"
@@ -892,6 +924,11 @@ class JadxEngine {
     private fun shortId(m: JavaMethod) = m.methodNode.methodInfo.shortId
     private fun mid(m: JavaMethod) = m.declaringClass.rawName + "#" + shortId(m)
     private fun fid(f: JavaField) = f.declaringClass.rawName + "#" + f.fieldNode.fieldInfo.shortId
+
+    // Raw-node variants used while indexing and iterating the raw model.
+    private fun shortId(m: MethodNode) = m.methodInfo.shortId
+    private fun mid(m: MethodNode) = m.declaringClass.rawName + "#" + shortId(m)
+    private fun fid(f: FieldNode) = f.declaringClass.rawName + "#" + f.fieldInfo.shortId
 
     private fun methodInfo(m: JavaMethod) = MethodInfo(
         name = m.name,
@@ -910,7 +947,7 @@ class JadxEngine {
         return "${method.declaringClass.fullName}.${method.name}($params):${method.returnType ?: "void"}"
     }
 
-    private fun pageClasses(all: List<JavaClass>, limit: Int, offset: Int) =
+    private fun pageClasses(all: List<ClassNode>, limit: Int, offset: Int) =
         PaginatedClasses(all.page(limit, offset).map { ClassRef(it.fullName, it.rawName) }, all.size, limit, offset)
 
     private fun <T> List<T>.page(limit: Int, offset: Int) = drop(offset.coerceAtLeast(0)).take(limit.coerceAtLeast(0))
@@ -973,8 +1010,7 @@ class JadxEngine {
         return literals
     }
 
-    private fun isAndroidComponent(cls: JavaClass, componentType: String): Boolean {
-        val classNode = cls.classNode
+    private fun isAndroidComponent(classNode: ClassNode, componentType: String): Boolean {
         if (classNode.superClass?.toString()?.contains(componentType) == true) return true
         return classNode.interfaces?.any { it.toString().contains(componentType) } ?: false
     }

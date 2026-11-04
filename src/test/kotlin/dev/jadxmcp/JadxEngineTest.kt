@@ -108,6 +108,27 @@ class JadxEngineTest {
     }
 
     @Test
+    fun testLazyLoadDoesNotDecompile() {
+        // Use a distinct jar name so no autosave edits exist for it: load must only parse raw nodes.
+        val lazy = JadxEngine()
+        val jarFile = File("test-app/build/sample-lazy.jar")
+        jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
+        try {
+            lazy.loadApk(jarFile.absolutePath)
+            assertEquals("loading must not decompile any class", 0, lazy.decompileCount())
+            assertTrue(lazy.listClasses(limit = 1000).items.isNotEmpty())
+            assertEquals("listing classes must not decompile", 0, lazy.decompileCount())
+            lazy.getClassSource(crypto)
+            assertEquals("reading source must decompile exactly one class", 1, lazy.decompileCount())
+            lazy.getClassSource(crypto)
+            assertEquals("second read must come from cache", 1, lazy.decompileCount())
+        } finally {
+            lazy.close()
+            jarFile.delete()
+        }
+    }
+
+    @Test
     fun testSearching() {
         assertTrue(engine.searchClasses("Crypto").items.any { it.rawName == crypto })
         assertTrue(engine.searchMethodByName("login").items.any { it.fullSignature.contains("AuthManager") })
