@@ -3,9 +3,11 @@
 ## Status
 
 - **Phase 0** (plan + API verification) — done (`8ade84a`)
-- **Phase 1a** (raw-node index, lazy decompile) — implemented in `JadxEngine.kt`; not yet
-  built/verified locally (CI build; see note at bottom). Lazy test added in `JadxEngineTest.kt`.
-- Phase 1b / 2 / 3 / 4 — pending.
+- **Phase 1a** (raw-node index, lazy decompile) — implemented (`310770f`); lazy test added
+  in `JadxEngineTest.kt`. Not built locally (CI build; see note at bottom).
+- **Phase 1b** (remove deobfuscation) — implemented in `JadxEngine.kt` + `ToolRegistry.kt`
+  (revoid) and `src/registries/mcp.py` (ArkAudit, working-tree change, uncommitted).
+- Phase 2 / 3 / 4 — pending.
 
 ## Problem
 

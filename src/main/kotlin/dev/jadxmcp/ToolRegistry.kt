@@ -25,10 +25,9 @@ fun registerTools(server: Server, engine: JadxEngine) {
         "Start loading an APK/DEX file in the background and return immediately; poll load_status until \"loaded\". Must be called first. Resets any edits.",
         mkSchema {
             required("apk_path"); prop("apk_path", "string", "Absolute path to APK/DEX file")
-            prop("deobfuscation", "boolean", "Enable jadx deobfuscation (default false)")
         }
     ) { req ->
-        wrap { json.encodeToString(engine.loadApkAsync(req.arguments.str("apk_path"), req.arguments.optBool("deobfuscation") ?: false)) }
+        wrap { json.encodeToString(engine.loadApkAsync(req.arguments.str("apk_path"))) }
     }
     server.addTool("load_status", "Progress of revoid_load_app: idle, loading, loaded (with class count) or error.", mkSchema {}) { _ ->
         wrap { json.encodeToString(engine.loadStatus()) }

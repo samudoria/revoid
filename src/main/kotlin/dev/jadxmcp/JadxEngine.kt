@@ -55,7 +55,6 @@ class JadxEngine {
     private var decompiler: JadxDecompiler? = null
     var currentApkPath: String? = null
     private var currentApkId: String? = null
-    private var currentDeobfuscation: Boolean = false
 
     // ── Indexes ──────────────────────────────────────────────
     // Raw dex nodes only. Built cheaply at load — never triggers decompilation. Java*
@@ -87,12 +86,12 @@ class JadxEngine {
 
     /** Starts loadApk on a background thread so a big APK can't block the MCP connection; poll [loadStatus]. */
     @Synchronized
-    fun loadApkAsync(path: String, deobfuscation: Boolean = false): Map<String, String> {
+    fun loadApkAsync(path: String): Map<String, String> {
         check(loader == null) { "An APK is already loading; poll load_status." }
         require(File(path).isFile) { "File not found: $path" }
         loadError = null
         loader = Thread {
-            try { loadApk(path, deobfuscation) } catch (e: Throwable) { loadError = e.toString(); log.error("Load failed", e) } finally { loader = null }
+            try { loadApk(path) } catch (e: Throwable) { loadError = e.toString(); log.error("Load failed", e) } finally { loader = null }
         }.apply { isDaemon = true; start() }
         return mapOf("status" to "loading", "hint" to "Poll load_status until it reports loaded.")
     }
@@ -106,13 +105,13 @@ class JadxEngine {
 
     // ── Loading ──────────────────────────────────────────────
 
-    fun loadApk(path: String, deobfuscation: Boolean = false): ApkInfo {
+    fun loadApk(path: String): ApkInfo {
         val file = File(path)
         require(file.exists()) { "File not found: $path" }
         require(file.isFile) { "Not a file: $path" }
 
         // Cache: same APK already loaded this session → reuse it instead of re-decompiling.
-        if (decompiler != null && currentApkPath == path && currentDeobfuscation == deobfuscation) {
+        if (decompiler != null && currentApkPath == path) {
             log.info("APK already loaded this session, reusing: {}", path)
             return currentApkInfo()
         }
@@ -125,7 +124,6 @@ class JadxEngine {
             threadsCount = Runtime.getRuntime().availableProcessors()
             isSkipResources = false
             isShowInconsistentCode = true
-            isDeobfuscationOn = deobfuscation
             isRespectBytecodeAccModifiers = true
             codeData = JadxCodeData()
         }
@@ -136,7 +134,6 @@ class JadxEngine {
         decompiler = jadx
         currentApkPath = path
         currentApkId = file.nameWithoutExtension
-        currentDeobfuscation = deobfuscation
         buildIndexes(jadx)
 
         log.info("Loaded {} classes from {}", classIndex.size, path)
@@ -1026,7 +1023,6 @@ class JadxEngine {
         decompiler = null
         currentApkPath = null
         currentApkId = null
-        currentDeobfuscation = false
         clearIndexes()
     }
 
