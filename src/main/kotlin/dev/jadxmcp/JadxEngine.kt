@@ -75,6 +75,9 @@ class JadxEngine {
     private val decompileCounter = java.util.concurrent.atomic.AtomicInteger()
     internal fun decompileCount(): Int = decompileCounter.get()
 
+    // Decoded AndroidManifest.xml text; decoded once on first manifest access (primed at load).
+    @Volatile private var manifestCache: String? = null
+
     // ── User edits (mirrors jadx-gui code data) ──────────────
     private val renames = mutableListOf<ICodeRename>()
     private val comments = mutableListOf<ICodeComment>()
@@ -122,7 +125,10 @@ class JadxEngine {
         val args = JadxArgs().apply {
             setInputFile(file)
             threadsCount = Runtime.getRuntime().availableProcessors()
-            isSkipResources = false
+            // Skip the eager resource-table processing: it is the slowest part of a full jadx load.
+            // The ResourceFile list is still built lazily on first resource tool access, and each
+            // file's content is decoded on demand (loadContent). The manifest is primed below.
+            isSkipResources = true
             isShowInconsistentCode = true
             isRespectBytecodeAccModifiers = true
             codeData = JadxCodeData()
@@ -140,6 +146,8 @@ class JadxEngine {
         autosavePath()?.takeIf { File(it).isFile }?.let { p ->
             try { loadProject(p); log.info("Restored edits from {}", p) } catch (e: Exception) { log.warn("Could not restore {}: {}", p, e.message) }
         }
+        // Parse only the manifest eagerly (cheap, single XML decode); every other resource stays lazy.
+        try { getAndroidManifest() } catch (e: Exception) { log.warn("Could not prime manifest: {}", e.message) }
         return currentApkInfo()
     }
 
@@ -375,9 +383,10 @@ class JadxEngine {
 
     internal fun getAndroidManifest(): String {
         ensureLoaded()
+        manifestCache?.let { return it }
         val res = decompiler?.resources?.find { it.originalName == "AndroidManifest.xml" }
             ?: throw IllegalArgumentException("AndroidManifest.xml not found")
-        return res.loadContent().text?.codeStr ?: "// Failed to decode AndroidManifest.xml"
+        return (res.loadContent().text?.codeStr ?: "// Failed to decode AndroidManifest.xml").also { manifestCache = it }
     }
 
     private fun manifestRoot(): Element {
@@ -900,6 +909,7 @@ class JadxEngine {
         classIndex.clear(); methodIndex.clear(); fieldIndex.clear(); displayIndex.clear()
         oldClassNames.clear(); lastClassName.clear(); lastMemberName.clear(); oldMemberNames.clear()
         sourceCache.clear(); renames.clear(); comments.clear()
+        manifestCache = null
     }
 
     private fun getCachedSource(cls: JavaClass): String {

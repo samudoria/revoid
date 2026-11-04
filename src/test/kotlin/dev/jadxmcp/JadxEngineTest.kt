@@ -129,6 +129,25 @@ class JadxEngineTest {
     }
 
     @Test
+    fun testResourcesLazyAndManifestPrimed() {
+        // isSkipResources=true: only the manifest is decoded eagerly at load (primed into the cache);
+        // every other resource is decoded on demand via loadContent when a tool asks for it.
+        val lazy = JadxEngine()
+        val jarFile = File("test-app/build/sample-res.jar")
+        jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
+        try {
+            lazy.loadApk(jarFile.absolutePath)
+            assertEquals("com.example.testapp.MainActivity", lazy.getMainActivityClass())
+            assertTrue(lazy.getAllResourceFileNames().items.contains("AndroidManifest.xml"))
+            assertTrue(lazy.getResourceFile("AndroidManifest.xml").contains("<manifest"))
+            assertSame("manifest must be decoded once and served from cache", lazy.getAndroidManifest(), lazy.getAndroidManifest())
+        } finally {
+            lazy.close()
+            jarFile.delete()
+        }
+    }
+
+    @Test
     fun testSearching() {
         assertTrue(engine.searchClasses("Crypto").items.any { it.rawName == crypto })
         assertTrue(engine.searchMethodByName("login").items.any { it.fullSignature.contains("AuthManager") })

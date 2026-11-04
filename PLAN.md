@@ -7,7 +7,11 @@
   in `JadxEngineTest.kt`. Not built locally (CI build; see note at bottom).
 - **Phase 1b** (remove deobfuscation) — implemented in `JadxEngine.kt` + `ToolRegistry.kt`
   (revoid) and `src/registries/mcp.py` (ArkAudit, working-tree change, uncommitted).
-- Phase 2 / 3 / 4 — pending.
+- **Phase 2** (lazy resources) — implemented: `isSkipResources = true` in `loadApk` (skips the
+  slow `RootNode.processResources`; the `ResourceFile` list is still built lazily via
+  `JadxDecompiler.getResources()` and content is decoded per-file via `loadContent`); manifest
+  is primed eagerly at load and cached (`manifestCache`); resource-lazy test added.
+- Phase 3 / 4 — pending.
 
 ## Problem
 
