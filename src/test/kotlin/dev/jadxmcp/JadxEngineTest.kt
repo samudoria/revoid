@@ -302,7 +302,10 @@ class JadxEngineTest {
         val saved = engine.saveProject("revoid-test.jadx")
         assertEquals(2, saved.renames)
         engine.listAnnotations().indices.reversed().forEach { engine.removeAnnotation(it) }
-        assertEquals("login", engine.getMethodSource(login, "login").lines().first { it.contains("(") }.let { "login" })
+        assertTrue(
+            engine.getMethodSource(login, "login").contains("boolean login("),
+            "method alias should be removed after clearing annotations",
+        )
         assertTrue(engine.getClassSource(login).contains("class AuthManager"))
         assertEquals(0, engine.listAnnotations().size)
 
