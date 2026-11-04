@@ -218,6 +218,39 @@ class JadxEngineTest {
     }
 
     @Test
+    fun testLoadAppWhileLoadingReturnsSoftStatus() {
+        // Mirrors REVOID_PRELOAD_APK: a background load (started at server startup) is already
+        // in flight when the agent calls revoid_load_app; the call must return a soft loading
+        // status rather than throw, so the agent polls load_status instead of erroring out.
+        val gated = JadxEngine(diskCacheEnabled = false)
+        val jarFile = File("test-app/build/sample-bg2.jar")
+        jarFile.writeBytes(File("test-app/build/sample.jar").readBytes())
+        try {
+            gated.loadGateMs = 3000
+            gated.loadApkAsync(jarFile.absolutePath)
+
+            val deadline = System.currentTimeMillis() + 5000
+            while (gated.loadStatus()["state"] != "loading" && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10)
+            }
+            assertEquals("loading", gated.loadStatus()["state"])
+
+            val second = gated.loadApkAsync(jarFile.absolutePath)
+            assertEquals("loading", second["state"])
+            assertEquals("loading", second["status"])
+
+            gated.loadGateMs = 0
+            val done = System.currentTimeMillis() + 10000
+            while (gated.loadStatus()["state"] != "ready" && System.currentTimeMillis() < done) Thread.sleep(20)
+            assertEquals("ready", gated.loadStatus()["state"])
+        } finally {
+            gated.loadGateMs = 0
+            gated.close()
+            jarFile.delete()
+        }
+    }
+
+    @Test
     fun testSearching() {
         assertTrue(engine.searchClasses("Crypto").items.any { it.rawName == crypto })
         assertTrue(engine.searchMethodByName("login").items.any { it.fullSignature.contains("AuthManager") })

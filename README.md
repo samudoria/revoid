@@ -175,6 +175,7 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 | `REVOID_CACHE_DIR` | Cross-session cache of decompiled source, keyed by APK sha256 (default `<tmp>/revoid-cache`). Repeat loads of the same APK skip re-decompiling |
 | `REVOID_CACHE_TTL_HOURS` | How long a cache entry stays valid (default `24`) |
 | `REVOID_CACHE_MAX_MB` | Total cache size cap; oldest entries are evicted (default `1024`) |
+| `REVOID_PRELOAD_APK` | APK path to load in the background as soon as the server starts (both STDIO and SSE), so a connecting agent finds it already `loading`/`ready` via `load_status` instead of a cold `revoid_load_app`. Ignored (with a warning) if the path is unreadable |
 
 
 ## Releases

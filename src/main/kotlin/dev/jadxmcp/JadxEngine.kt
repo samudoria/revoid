@@ -113,7 +113,15 @@ class JadxEngine(
     /** Starts loadApk on a background thread so a big APK can't block the MCP connection; poll [loadStatus]. */
     @Synchronized
     fun loadApkAsync(path: String): Map<String, String> {
-        check(loader == null) { "An APK is already loading; poll load_status." }
+        if (loader != null) {
+            // A load is already in flight (e.g. started via REVOID_PRELOAD_APK at server startup).
+            // Soft status, not an error: the agent should poll load_status and retry.
+            return mapOf(
+                "status" to "loading",
+                "state" to "loading",
+                "hint" to "An APK is already loading; poll load_status until it reports loaded.",
+            )
+        }
         require(File(path).isFile) { "File not found: $path" }
         loadError = null
         loadState = LoadState.LOADING

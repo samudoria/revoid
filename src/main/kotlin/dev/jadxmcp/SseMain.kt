@@ -23,6 +23,7 @@ fun main() {
     val host = System.getenv("REVOID_HOST") ?: "0.0.0.0"
     val port = System.getenv("REVOID_PORT")?.toIntOrNull() ?: 3000
     val engine = JadxEngine()  // one engine shared by all SSE connections (single-user analysis)
+    preloadApkFromEnv(engine, log)
 
     val keystore = System.getenv("REVOID_TLS_KEYSTORE")
     val scheme = if (keystore != null) "https" else "http"
