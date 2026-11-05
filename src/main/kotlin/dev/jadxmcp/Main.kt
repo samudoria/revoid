@@ -13,7 +13,7 @@ import kotlinx.io.buffered
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-const val REVOID_VERSION = "1.1.0"
+const val REVOID_VERSION = "1.1.3"
 
 /** A fresh MCP Server wired to [engine] and all tools. Reused by the STDIO and SSE entrypoints. */
 fun newServer(engine: JadxEngine): Server {
