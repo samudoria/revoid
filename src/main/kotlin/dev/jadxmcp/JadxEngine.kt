@@ -113,33 +113,50 @@ class JadxEngine(
     /** Starts loadApk on a background thread so a big APK can't block the MCP connection; poll [loadStatus]. */
     @Synchronized
     fun loadApkAsync(path: String): Map<String, String> {
-        if (loader != null) {
-            // A load is already in flight (e.g. started via REVOID_PRELOAD_APK at server startup).
-            // Soft status, not an error: the agent should poll load_status and retry.
-            return mapOf(
-                "status" to "loading",
-                "state" to "loading",
-                "hint" to "An APK is already loading; poll load_status until it reports loaded.",
-            )
-        }
         require(File(path).isFile) { "File not found: $path" }
+
+        // 1. Already loaded THIS apk → no-op, report ready. (The key missing case.)
+        if (loadState == LoadState.LOADED && currentApkPath == path) {
+            return mapOf("status" to "loaded", "state" to "loaded",
+                        "hint" to "Already loaded; proceed.")
+        }
+        // 2. A load for THIS apk is in flight → tell them to poll, don't start another.
+        if (loadState == LoadState.LOADING && loadingPath == path) {
+            return mapOf("status" to "loading", "state" to "loading",
+                        "hint" to "This APK is already loading; poll load_status.")
+        }
+        // 3. A DIFFERENT apk is loading → refuse (or queue); do NOT stomp it.
+        if (loadState == LoadState.LOADING) {
+            return mapOf("status" to "busy", "state" to "loading",
+                        "hint" to "A different APK is loading; wait for it to finish.")
+        }
+
+        // Fresh load (idle, error, or switching apk): now it's safe to start.
         loadError = null
         loadState = LoadState.LOADING
+        loadingPath = path            // track WHICH apk is loading
         loadProgress = 0.0
         loadStartedAt = System.currentTimeMillis()
         loader = Thread {
             try {
                 loadApk(path)
+                synchronized(this) {          // guard the terminal transition too
+                    currentApkPath = path
+                    loadState = LoadState.LOADED
+                }
             } catch (e: Throwable) {
                 log.error("Load failed", e)
-                loadError = e.toString()
-                loadFinishedAt = System.currentTimeMillis()
-                loadState = LoadState.ERROR
+                synchronized(this) {
+                    loadError = e.toString()
+                    loadState = LoadState.ERROR
+                }
             } finally {
-                loader = null
+                synchronized(this) { loader = null }
             }
         }.apply { isDaemon = true; start() }
-        return mapOf("status" to "loading", "state" to "loading", "hint" to "Poll load_status until it reports loaded.")
+
+        return mapOf("status" to "loading", "state" to "loading",
+                    "hint" to "Poll load_status until it reports loaded.")
     }
 
     fun loadStatus(): Map<String, String> = when (loadState) {
