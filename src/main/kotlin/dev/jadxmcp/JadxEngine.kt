@@ -101,7 +101,6 @@ class JadxEngine(
 
     val isLoaded: Boolean get() = decompiler != null
     @Volatile private var loadingPath: String? = null
-    @Volatile private var currentApkPath: String? = null
     @Volatile private var loader: Thread? = null
     @Volatile private var loadState: LoadState = LoadState.IDLE
     @Volatile private var loadError: String? = null
