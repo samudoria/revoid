@@ -100,7 +100,8 @@ class JadxEngine(
     private val comments = mutableListOf<ICodeComment>()
 
     val isLoaded: Boolean get() = decompiler != null
-
+    @Volatile private var loadingPath: String? = null
+    @Volatile private var currentApkPath: String? = null
     @Volatile private var loader: Thread? = null
     @Volatile private var loadState: LoadState = LoadState.IDLE
     @Volatile private var loadError: String? = null
@@ -116,7 +117,7 @@ class JadxEngine(
         require(File(path).isFile) { "File not found: $path" }
 
         // 1. Already loaded THIS apk → no-op, report ready. (The key missing case.)
-        if (loadState == LoadState.LOADED && currentApkPath == path) {
+        if (loadState == LoadState.READY && currentApkPath == path) {
             return mapOf("status" to "loaded", "state" to "loaded",
                         "hint" to "Already loaded; proceed.")
         }
@@ -142,7 +143,7 @@ class JadxEngine(
                 loadApk(path)
                 synchronized(this) {          // guard the terminal transition too
                     currentApkPath = path
-                    loadState = LoadState.LOADED
+                    loadState = LoadState.READY
                 }
             } catch (e: Throwable) {
                 log.error("Load failed", e)
