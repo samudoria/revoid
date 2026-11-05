@@ -67,11 +67,11 @@ class JadxEngine(
 
     private val log = LoggerFactory.getLogger(JadxEngine::class.java)
 
-    private var decompiler: JadxDecompiler? = null
-    var currentApkPath: String? = null
-    private var currentApkId: String? = null
+    @Volatile private var decompiler: JadxDecompiler? = null
+    @Volatile var currentApkPath: String? = null
+    @Volatile private var currentApkId: String? = null
     /** sha256 of the loaded APK; used as the in-session and disk cache key. */
-    private var currentApkHash: String? = null
+    @Volatile private var currentApkHash: String? = null
 
     // ── Indexes ──────────────────────────────────────────────
     // Raw dex nodes only. Built cheaply at load — never triggers decompilation. Java*
@@ -121,9 +121,9 @@ class JadxEngine(
     fun loadApkAsync(path: String): Map<String, String> {
         require(File(path).isFile) { "File not found: $path" }
 
-        // Idempotent: this APK is already loaded → no-op, report ready. Prevents a second load_app
-        // call from tearing down the loaded project (close()) and racing the state back to idle.
-        if (loadState == LoadState.READY && currentApkPath == path) {
+        // Idempotent: this APK is genuinely loaded → no-op, report ready. The decompiler check is
+        // essential: a stale READY (decompiler torn down without resetting state) must not skip a reload.
+        if (loadState == LoadState.READY && currentApkPath == path && decompiler != null) {
             return loadStatus()
         }
         // A different APK is already loaded → switch to the new one (fall through to load it).
@@ -181,14 +181,21 @@ class JadxEngine(
             "elapsed_s" to elapsedLoadSeconds().toString(),
             "hint" to "APK is still loading (this is normal and can take minutes). Wait; do not end the session.",
         )
-        LoadState.READY -> mapOf(
-            "state" to "ready",
-            "status" to "loaded",
-            "apkId" to (currentApkId ?: ""),
-            "classCount" to classIndex.size.toString(),
-            "elapsed_s" to elapsedLoadSeconds().toString(),
-            "hint" to "APK is loaded. Proceed with analysis.",
-        )
+        // Defensive: READY must imply a live decompiler. If they ever drift apart, report the truth
+        // (not loaded) rather than telling the agent an APK is available when every tool would fail.
+        LoadState.READY ->
+            if (decompiler != null) mapOf(
+                "state" to "ready",
+                "status" to "loaded",
+                "apkId" to (currentApkId ?: ""),
+                "classCount" to classIndex.size.toString(),
+                "elapsed_s" to elapsedLoadSeconds().toString(),
+                "hint" to "APK is loaded. Proceed with analysis.",
+            ) else mapOf(
+                "state" to "idle",
+                "status" to "not_loaded",
+                "hint" to "No APK loaded; call revoid_load_app(apk_path).",
+            )
         LoadState.ERROR -> mapOf(
             "state" to "error",
             "status" to "error",
@@ -217,17 +224,19 @@ class JadxEngine(
             return currentApkInfo()
         }
 
+        // Tear down any previous load first; close() resets the state to IDLE, so re-enter LOADING
+        // afterwards to keep the state machine consistent (never READY with a null decompiler).
+        close()
         loadState = LoadState.LOADING
         loadStartedAt = System.currentTimeMillis()
         loadProgress = 0.05
         loadError = null
-        // Register this thread as the loader so ensureLoaded() lets our own restore/prime steps
+        // Register this thread as the loader so requireLoaded() lets our own restore/prime steps
         // through while state is LOADING (the async path already set this to its worker thread,
         // which is this same thread; a direct synchronous loadApk would otherwise self-block).
         val prevLoader = loader
         loader = Thread.currentThread()
         if (loadGateMs > 0) Thread.sleep(loadGateMs)
-        close()
         log.info("Loading APK: {} (sha256 {})", path, hash)
 
         try {
@@ -296,7 +305,7 @@ class JadxEngine(
     // ── Classes ──────────────────────────────────────────────
 
     fun listClasses(filter: String? = null, limit: Int = 50, offset: Int = 0): PaginatedClasses {
-        ensureLoaded()
+        requireLoaded()
         val all = classIndex.values.filter {
             filter.isNullOrBlank() || it.fullName.startsWith(filter, true) || it.rawName.startsWith(filter, true)
         }.sortedBy { it.fullName }
@@ -310,7 +319,7 @@ class JadxEngine(
         lineNumbers: Boolean = false,
         maxChars: Int = DEFAULT_MAX_CHARS,
     ): String {
-        ensureLoaded()
+        requireLoaded()
         val lines = getCachedSource(findClass(className)).lines()
         val total = lines.size
         val s = (startLine ?: 1).coerceAtLeast(1)
@@ -329,7 +338,7 @@ class JadxEngine(
     }
 
     fun getClassSummary(className: String): ClassSummary {
-        ensureLoaded()
+        requireLoaded()
         val classNode = findClassNode(className)
         return ClassSummary(
             name = classNode.fullName,
@@ -347,14 +356,14 @@ class JadxEngine(
     }
 
     fun searchClasses(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedClasses {
-        ensureLoaded()
+        requireLoaded()
         val match = matcher(query, isRegex)
         val all = classIndex.values.filter { match(it.fullName) || match(it.rawName) }.sortedBy { it.fullName }
         return pageClasses(all, limit, offset)
     }
 
     fun searchClassesByKeyword(keyword: String, limit: Int = 50, offset: Int = 0): PaginatedClasses {
-        ensureLoaded()
+        requireLoaded()
         val lower = keyword.lowercase()
         val all = classIndex.values.filter { !it.isInner && getCachedSource(javaClassOf(it)).lowercase().contains(lower) }
             .sortedBy { it.fullName }
@@ -364,13 +373,13 @@ class JadxEngine(
     // ── Methods & fields ─────────────────────────────────────
 
     fun listMethods(className: String, limit: Int = 50, offset: Int = 0): PaginatedMethods {
-        ensureLoaded()
+        requireLoaded()
         val methods = findClassNode(className).methods.map { methodInfo(javaMethodOf(it)) }
         return PaginatedMethods(methods.page(limit, offset), methods.size, limit, offset)
     }
 
     fun getMethodSource(className: String, methodName: String, methodId: String? = null): String {
-        ensureLoaded()
+        requireLoaded()
         val cls = findClass(className)
         val source = getCachedSource(cls)
 
@@ -390,7 +399,7 @@ class JadxEngine(
     }
 
     fun getFieldsOfClass(className: String): List<FieldInfo> {
-        ensureLoaded()
+        requireLoaded()
         return findClass(className).fields.map { field ->
             val mods = field.accessFlags
             val flags = listOfNotNull(
@@ -404,13 +413,13 @@ class JadxEngine(
     }
 
     fun getSmaliOfClass(className: String): String {
-        ensureLoaded()
+        requireLoaded()
         return findClass(className).smali ?: "// Smali generation failed or unsupported."
     }
 
     /** Smali `.method` declaration lines (access flags + name + descriptor) for every method in the class. */
     fun getSmaliMethodSignatures(className: String): List<String> {
-        ensureLoaded()
+        requireLoaded()
         val smali = findClass(className).smali ?: return emptyList()
         return smali.lines().map { it.trim() }
             .filter { it.startsWith(".method ") }
@@ -419,14 +428,14 @@ class JadxEngine(
 
     /** Import lines from the class's decompiled source (fully-qualified; `static` kept, `;` stripped). */
     fun getClassImports(className: String): List<String> {
-        ensureLoaded()
+        requireLoaded()
         return getCachedSource(findClass(className)).lines().map { it.trim() }
             .filter { it.startsWith("import ") }
             .map { it.removePrefix("import ").removeSuffix(";").trim() }
     }
 
     fun searchMethodByName(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedMethods {
-        ensureLoaded()
+        requireLoaded()
         val match = matcher(query, isRegex)
         val methods = methodIndex.values
             .filter { match(it.alias) || match(it.methodInfo.name) }
@@ -442,7 +451,7 @@ class JadxEngine(
      * fall back to const-string instructions in the smali.
      */
     fun searchStrings(query: String, limit: Int = 50, offset: Int = 0): PaginatedStringMatches {
-        ensureLoaded()
+        requireLoaded()
         val results = mutableListOf<StringMatch>()
         val lowerQuery = query.lowercase()
 
@@ -487,20 +496,20 @@ class JadxEngine(
     // ── Resources & Manifest ─────────────────────────────────
 
     fun getAllResourceFileNames(limit: Int = 50, offset: Int = 0): PaginatedStrings {
-        ensureLoaded()
+        requireLoaded()
         val names = decompiler?.resources?.map { it.originalName } ?: emptyList()
         return PaginatedStrings(names.page(limit, offset), names.size, limit, offset)
     }
 
     fun getResourceFile(name: String): String {
-        ensureLoaded()
+        requireLoaded()
         val res = decompiler?.resources?.find { it.originalName == name }
             ?: throw IllegalArgumentException("Resource file '$name' not found.")
         return res.loadContent().text?.codeStr ?: "// Resource could not be decoded as text."
     }
 
     fun getResourceStrings(limit: Int = 50, offset: Int = 0): PaginatedResourceStrings {
-        ensureLoaded()
+        requireLoaded()
         val res = decompiler?.resources?.find { it.originalName.endsWith("res/values/strings.xml") }
             ?: throw IllegalArgumentException("strings.xml not found. Are resources parsed?")
         val xml = res.loadContent().text?.codeStr ?: return PaginatedResourceStrings(emptyList(), 0, limit, offset)
@@ -510,7 +519,7 @@ class JadxEngine(
     }
 
     internal fun getAndroidManifest(): String {
-        ensureLoaded()
+        requireLoaded()
         manifestCache?.let { return it }
         val res = decompiler?.resources?.find { it.originalName == "AndroidManifest.xml" }
             ?: throw IllegalArgumentException("AndroidManifest.xml not found")
@@ -612,17 +621,17 @@ class JadxEngine(
     }
 
     fun xrefsToClass(className: String, limit: Int = 50, offset: Int = 0): PaginatedXrefs {
-        ensureLoaded()
+        requireLoaded()
         return xrefs(findClass(className).useIn, limit, offset)
     }
 
     fun xrefsToMethod(methodSignature: String, limit: Int = 50, offset: Int = 0, exact: Boolean = true): PaginatedXrefs {
-        ensureLoaded()
+        requireLoaded()
         return xrefs(resolveMethod(methodSignature, exact).useIn, limit, offset)
     }
 
     fun xrefsToField(className: String, fieldName: String, limit: Int = 50, offset: Int = 0): PaginatedXrefs {
-        ensureLoaded()
+        requireLoaded()
         val cls = findClass(className)
         val field = fieldIndex[cls.rawName + "#" + fieldName]?.let { javaFieldOf(it) }
             ?: cls.fields.find { memberNameMatches(fid(it), it.name, it.fieldNode.fieldInfo.name, fieldName) }
@@ -633,7 +642,7 @@ class JadxEngine(
     // ── Call graph ───────────────────────────────────────────
 
     fun getCallers(methodSignature: String, exact: Boolean = true, limit: Int = 50, offset: Int = 0): PaginatedMethodRefs {
-        ensureLoaded()
+        requireLoaded()
         val refs = resolveMethod(methodSignature, exact).useIn
             .filterIsInstance<JavaMethod>()
             .map { MethodRef(getMethodSignature(it), mid(it)) }
@@ -642,7 +651,7 @@ class JadxEngine(
     }
 
     fun getCallees(methodSignature: String, exact: Boolean = true, limit: Int = 50, offset: Int = 0): PaginatedMethodRefs {
-        ensureLoaded()
+        requireLoaded()
         val mNode = resolveMethod(methodSignature, exact).methodNode
         if (mNode.instructions == null) {
             try { mNode.unload(); mNode.load() } catch (_: Exception) {}
@@ -668,12 +677,12 @@ class JadxEngine(
 
     /** Resolve a display/raw name (and optional member) to a raw jadx node reference. */
     fun resolveNode(className: String, member: String? = null, fuzzy: Boolean = false): RefInfo {
-        ensureLoaded()
+        requireLoaded()
         return refInfo(nodeRef(resolveMember(findClass(className, fuzzy), member)))
     }
 
     fun renameNode(className: String, member: String?, newName: String): EditResult {
-        ensureLoaded()
+        requireLoaded()
         val cls = findClass(className)
         getCachedSource(cls) // anonymous/inline flags are only known after decompilation
         val node = resolveMember(cls, member)
@@ -692,7 +701,7 @@ class JadxEngine(
     }
 
     fun addComment(className: String, member: String?, text: String, style: String? = null): EditResult {
-        ensureLoaded()
+        requireLoaded()
         require(text.isNotBlank()) { "Comment text is empty" }
         val cls = findClass(className)
         getCachedSource(cls)
@@ -709,7 +718,7 @@ class JadxEngine(
     }
 
     fun listAnnotations(): List<AnnotationInfo> {
-        ensureLoaded()
+        requireLoaded()
         val out = mutableListOf<AnnotationInfo>()
         for (r in renames) {
             out.add(AnnotationInfo(out.size, "rename", refInfo(r.nodeRef), nodeOfRef(r.nodeRef)?.let { describe(it) },
@@ -724,7 +733,7 @@ class JadxEngine(
 
     /** Remove one annotation by its index in the current [listAnnotations] output (indexes shift after removal). */
     fun removeAnnotation(index: Int): EditResult {
-        ensureLoaded()
+        requireLoaded()
         val all = listAnnotations()
         require(index in all.indices) { "No annotation with index $index (have ${all.size})" }
         val a = all[index]
@@ -736,7 +745,7 @@ class JadxEngine(
     }
 
     fun saveProject(path: String): ProjectResult {
-        ensureLoaded()
+        requireLoaded()
         val root = outputRoot()
         val target = (if (File(path).isAbsolute) File(path) else File(root, path)).canonicalFile
         require(target.path.startsWith(root.path + File.separator)) { "Path must be inside REVOID_OUTPUT_ROOT ($root)" }
@@ -774,7 +783,7 @@ class JadxEngine(
 
     /** Replace current renames/comments with those in a jadx-gui .jadx project file and reload affected classes. */
     fun loadProject(path: String): ProjectResult {
-        ensureLoaded()
+        requireLoaded()
         val file = File(path)
         require(file.isFile) { "Not a file: $path" }
         val data = Json.parseToJsonElement(file.readText()).jsonObject["codeData"]?.jsonObject
@@ -1015,17 +1024,28 @@ class JadxEngine(
 
     // ── Name resolution ──────────────────────────────────────
 
-    private fun ensureLoaded() {
-        // While a load is in progress (except on the loader thread itself) tools get a soft
-        // initializing signal instead of a hard error, so agents can poll load_status and retry.
-        if (loadState == LoadState.LOADING && loader !== Thread.currentThread()) {
-            throw LoadingException(
-                "APK is still loading (state=loading, elapsed ${elapsedLoadSeconds()}s); " +
-                    "poll load_status until state=ready, or retry in ~2s. " +
-                    "Decompiled source is produced lazily on demand."
-            )
+    /**
+     * Single guard for every analysis tool. Distinguishes "still loading", "load failed" and
+     * "nothing loaded" instead of collapsing all three into the misleading "No APK loaded".
+     */
+    private fun requireLoaded() {
+        when {
+            decompiler != null && loadState == LoadState.READY -> return
+            // The loader thread itself is allowed through while it primes caches during load.
+            loadState == LoadState.LOADING && loader === Thread.currentThread() -> return
+            // While a load is in progress tools get a soft initializing signal instead of a hard
+            // error, so agents can poll load_status and retry.
+            loadState == LoadState.LOADING ->
+                throw LoadingException(
+                    "APK is still loading (state=loading, elapsed ${elapsedLoadSeconds()}s); " +
+                        "poll load_status until state=ready, or retry in ~2s. " +
+                        "Decompiled source is produced lazily on demand."
+                )
+            loadState == LoadState.ERROR ->
+                throw IllegalStateException("APK load failed: ${loadError ?: "unknown error"}")
+            else ->
+                throw IllegalStateException("No APK loaded. Call revoid_load_app(apk_path) first.")
         }
-        checkNotNull(decompiler) { "No APK loaded. Call revoid_load_app first." }
     }
 
     /**
@@ -1274,6 +1294,12 @@ class JadxEngine(
         currentApkId = null
         currentApkHash = null
         clearIndexes()
+        // Keep the state machine in sync with the decompiler: READY must never survive teardown,
+        // otherwise load_status lies while every analysis tool reports "No APK loaded".
+        loadState = LoadState.IDLE
+        loadProgress = 0.0
+        loadError = null
+        loadFinishedAt = 0
     }
 
     companion object {
