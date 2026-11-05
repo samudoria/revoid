@@ -110,63 +110,76 @@ class JadxEngine(
     /** Test hook: if > 0 the loader thread sleeps this long after entering LOADING so tests can observe the loading state. */
     @Volatile internal var loadGateMs: Long = 0
 
-    /** Starts loadApk on a background thread so a big APK can't block the MCP connection; poll [loadStatus]. */
+    /**
+    * Loads the APK and BLOCKS until it is fully loaded (or fails), returning the final result.
+    * This single blocking call replaces the old async+poll design: an impatient agent that got a
+    * "loading" status would end its turn without polling. The MCP framework waits on a slow tool call
+    * normally, so blocking here is fine. A background thread + timeout is still used so a pathological
+    * APK can't hang the connection forever.
+    */
     @Synchronized
     fun loadApkAsync(path: String): Map<String, String> {
         require(File(path).isFile) { "File not found: $path" }
 
-        // 1. Already loaded THIS apk → no-op, report ready. (The key missing case.)
+        // Idempotent: this APK is already loaded → no-op, report ready. Prevents a second load_app
+        // call from tearing down the loaded project (close()) and racing the state back to idle.
         if (loadState == LoadState.READY && currentApkPath == path) {
-            return mapOf("status" to "loaded", "state" to "loaded",
-                        "hint" to "Already loaded; proceed.")
+            return loadStatus()
         }
-        // 2. A load for THIS apk is in flight → tell them to poll, don't start another.
-        if (loadState == LoadState.LOADING && loadingPath == path) {
-            return mapOf("status" to "loading", "state" to "loading",
-                        "hint" to "This APK is already loading; poll load_status.")
-        }
-        // 3. A DIFFERENT apk is loading → refuse (or queue); do NOT stomp it.
-        if (loadState == LoadState.LOADING) {
-            return mapOf("status" to "busy", "state" to "loading",
-                        "hint" to "A different APK is loading; wait for it to finish.")
-        }
+        // A different APK is already loaded → switch to the new one (fall through to load it).
+        // (loadApk() calls close() internally; that's correct when deliberately switching.)
 
-        // Fresh load (idle, error, or switching apk): now it's safe to start.
         loadError = null
         loadState = LoadState.LOADING
-        loadingPath = path            // track WHICH apk is loading
         loadProgress = 0.0
         loadStartedAt = System.currentTimeMillis()
-        loader = Thread {
+
+        // Run the actual load on a daemon thread so we can enforce a hard timeout, but JOIN on it here
+        // so this call does not return until the load is done. The agent gets one final result.
+        val worker = Thread {
             try {
                 loadApk(path)
-                synchronized(this) {          // guard the terminal transition too
-                    currentApkPath = path
-                    loadState = LoadState.READY
-                }
+                currentApkPath = path
+                loadState = LoadState.READY
             } catch (e: Throwable) {
                 log.error("Load failed", e)
-                synchronized(this) {
-                    loadError = e.toString()
-                    loadState = LoadState.ERROR
-                }
+                loadError = e.toString()
+                loadState = LoadState.ERROR
             } finally {
-                synchronized(this) { loader = null }
+                loadFinishedAt = System.currentTimeMillis()
+                loader = null
             }
         }.apply { isDaemon = true; start() }
+        loader = worker
 
-        return mapOf("status" to "loading", "state" to "loading",
-                    "hint" to "Poll load_status until it reports loaded.")
+        // Block until the load finishes or the timeout elapses.
+        val timeoutMs = (System.getenv("REVOID_LOAD_TIMEOUT_S")?.toLongOrNull() ?: 900L) * 1000
+        worker.join(timeoutMs)
+
+        if (worker.isAlive) {
+            // Timed out. Leave it running (it's a daemon) but report the timeout so the agent doesn't hang.
+            return mapOf(
+                "status" to "error",
+                "state" to "error",
+                "error" to "Load timed out after ${timeoutMs / 1000}s",
+                "hint" to "The APK is unusually large or decompilation stalled. Try again, or raise REVOID_LOAD_TIMEOUT_S.",
+            )
+        }
+        return loadStatus()   // final ready/error result in this same call
     }
 
     fun loadStatus(): Map<String, String> = when (loadState) {
-        LoadState.IDLE -> mapOf("state" to "idle", "status" to "idle")
+        LoadState.IDLE -> mapOf(
+            "state" to "idle",
+            "status" to "not_loaded",
+            "hint" to "No APK loaded. Call revoid_load_app(apk_path) to load one; it returns when loading is done.",
+        )
         LoadState.LOADING -> mapOf(
             "state" to "loading",
             "status" to "loading",
             "progress" to "%.2f".format(loadProgress),
             "elapsed_s" to elapsedLoadSeconds().toString(),
-            "hint" to "APK is loading; poll load_status until state=ready, or retry the tool shortly.",
+            "hint" to "APK is still loading (this is normal and can take minutes). Wait; do not end the session.",
         )
         LoadState.READY -> mapOf(
             "state" to "ready",
@@ -174,12 +187,14 @@ class JadxEngine(
             "apkId" to (currentApkId ?: ""),
             "classCount" to classIndex.size.toString(),
             "elapsed_s" to elapsedLoadSeconds().toString(),
+            "hint" to "APK is loaded. Proceed with analysis.",
         )
         LoadState.ERROR -> mapOf(
             "state" to "error",
             "status" to "error",
             "error" to (loadError ?: "Unknown error"),
             "elapsed_s" to elapsedLoadSeconds().toString(),
+            "hint" to "Load failed. Report this error; do not retry blindly.",
         )
     }
 
