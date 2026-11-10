@@ -107,6 +107,8 @@ data class PaginatedClasses(
     val totalCount: Int,
     val limit: Int,
     val offset: Int,
+    /** True when the scan stopped at REVOID_TOOL_TIMEOUT_S and the result is partial. */
+    val truncated: Boolean = false,
 )
 
 /** A class by display name plus its stable raw (original) name. */
@@ -188,6 +190,8 @@ data class PaginatedStringMatches(
     val totalCount: Int,
     val limit: Int,
     val offset: Int,
+    /** True when the scan stopped at REVOID_TOOL_TIMEOUT_S and the result is partial. */
+    val truncated: Boolean = false,
 )
 
 @Serializable

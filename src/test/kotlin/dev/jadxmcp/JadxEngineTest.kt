@@ -63,6 +63,7 @@ class JadxEngineTest {
         val match = engine.searchStrings("SUPER_SECRET").items.find { it.value.contains("SUPER_SECRET_KEY") }
         assertNotNull(match)
         assertEquals(crypto, match!!.className)
+        assertEquals("dex", match.origin)
     }
 
     @Test

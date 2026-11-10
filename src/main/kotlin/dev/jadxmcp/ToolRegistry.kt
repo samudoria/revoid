@@ -4,12 +4,22 @@ import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("dev.jadxmcp.ToolRegistry")
 private val json = Json { prettyPrint = true; encodeDefaults = true }
+
+// Tool handlers block on jadx work. Cap how many run at once so a burst cannot exhaust the
+// coroutine/Netty threads, and run them on IO so the MCP event loop stays responsive.
+private val toolSemaphore = Semaphore(
+    System.getenv("REVOID_MAX_CONCURRENT_TOOLS")?.toIntOrNull()?.coerceAtLeast(1) ?: 4
+)
 
 fun registerTools(server: Server, engine: JadxEngine) {
     val page = "Pagination: limit (default 50), offset (default 0)"
@@ -81,7 +91,7 @@ fun registerTools(server: Server, engine: JadxEngine) {
     }
 
     server.addTool("search_strings",
-        "Search string constants across all classes. Also scans smali const-string for methods that failed to decompile.",
+        "Search string constants from the raw dex (const-string) across all classes. Fast; does not decompile.",
         mkSchema { required("query"); prop("query", "string", "Substring to search"); paging() }
     ) { req ->
         wrap { json.encodeToString(engine.searchStrings(req.arguments.str("query"), req.arguments.lim(), req.arguments.off())) }
@@ -219,24 +229,28 @@ fun registerTools(server: Server, engine: JadxEngine) {
     }
 }
 
-private inline fun wrap(block: () -> String): CallToolResult = try {
-    CallToolResult(content = listOf(TextContent(block())))
-} catch (e: LoadingException) {
-    // Soft "initializing" response instead of a hard error: the load is in progress, not failed.
-    // Agents should poll load_status and retry after retry_after_s seconds.
-    CallToolResult(content = listOf(TextContent(buildJsonObject {
-        put("status", "initializing")
-        put("state", e.state)
-        put("retry_after_s", e.retryAfterS)
-        put("hint", e.message)
-    }.toString())))
-} catch (e: IllegalArgumentException) {
-    CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
-} catch (e: IllegalStateException) {
-    CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
-} catch (e: Exception) {
-    log.error("Tool error", e)
-    CallToolResult(content = listOf(TextContent("Internal error: ${e.javaClass.simpleName}: ${e.message}")), isError = true)
+private suspend fun wrap(block: () -> String): CallToolResult = toolSemaphore.withPermit {
+    withContext(Dispatchers.IO) {
+        try {
+            CallToolResult(content = listOf(TextContent(block())))
+        } catch (e: LoadingException) {
+            // Soft "initializing" response instead of a hard error: the load is in progress, not failed.
+            // Agents should poll load_status and retry after retry_after_s seconds.
+            CallToolResult(content = listOf(TextContent(buildJsonObject {
+                put("status", "initializing")
+                put("state", e.state)
+                put("retry_after_s", e.retryAfterS)
+                put("hint", e.message)
+            }.toString())))
+        } catch (e: IllegalArgumentException) {
+            CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
+        } catch (e: IllegalStateException) {
+            CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
+        } catch (e: Exception) {
+            log.error("Tool error", e)
+            CallToolResult(content = listOf(TextContent("Internal error: ${e.javaClass.simpleName}: ${e.message}")), isError = true)
+        }
+    }
 }
 
 private class SB {

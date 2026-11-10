@@ -18,9 +18,10 @@ import jadx.api.data.impl.JadxCodeRef
 import jadx.api.data.impl.JadxCodeRename
 import jadx.api.data.impl.JadxNodeRef
 import jadx.core.dex.attributes.AFlag
-import jadx.core.dex.attributes.AType
+import jadx.core.dex.instructions.ConstStringNode
 import jadx.core.dex.instructions.InsnType
 import jadx.core.dex.instructions.InvokeNode
+import jadx.core.dex.instructions.args.InsnWrapArg
 import jadx.core.dex.nodes.ClassNode
 import jadx.core.dex.nodes.FieldNode
 import jadx.core.dex.nodes.MethodNode
@@ -33,6 +34,7 @@ import java.io.StringReader
 import java.io.StringWriter
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.withLock
 import javax.lang.model.SourceVersion
 import javax.xml.XMLConstants
@@ -69,11 +71,16 @@ class JadxEngine(
 
     private val log = LoggerFactory.getLogger(JadxEngine::class.java)
 
-    // One lock serializes every operation that touches the decompiler, indexes, edit lists or
-    // load state. MCP clients fire tool calls concurrently; without this a read can observe the
-    // loader's transient teardown/publish states (e.g. IDLE while a load is starting).
-    private val lock = ReentrantLock()
-    private inline fun <T> locked(block: () -> T): T = lock.withLock(block)
+    // Reads (analysis tools) share the read lock; load/close/edits take the write lock. This keeps
+    // the loader's transient teardown/publish states invisible to readers without forcing every
+    // read to queue behind another read (e.g. a long search no longer blocks get_class_summary).
+    private val stateLock = ReentrantReadWriteLock()
+    private inline fun <T> read(block: () -> T): T = stateLock.readLock().withLock(block)
+    private inline fun <T> write(block: () -> T): T = stateLock.writeLock().withLock(block)
+
+    // jadx decompilation itself is not safe to run concurrently; serialize only the actual
+    // `top.code` computation so cheap reads and index searches can still proceed in parallel.
+    private val decompileLock = ReentrantLock()
 
     @Volatile private var decompiler: JadxDecompiler? = null
     @Volatile var currentApkPath: String? = null
@@ -95,6 +102,10 @@ class JadxEngine(
 
     // top-level raw class name → decompiled source
     private val sourceCache = ConcurrentHashMap<String, String>()
+
+    // Raw dex string literals (const-string), built lazily on the first search without decompiling.
+    @Volatile private var stringIndex: List<StringMatch>? = null
+    private val stringIndexLock = ReentrantLock()
 
     // How many top-level classes have been decompiled on demand (laziness signal for tests).
     private val decompileCounter = java.util.concurrent.atomic.AtomicInteger()
@@ -133,7 +144,7 @@ class JadxEngine(
         // essential: a stale READY (decompiler torn down without resetting state) must not skip a reload.
         // The transition to LOADING is taken under the lock so it can never interrupt a read that is
         // already executing on another thread.
-        val alreadyLoaded = locked {
+        val alreadyLoaded = write {
             if (loadState == LoadState.READY && currentApkPath == path && decompiler != null) {
                 true
             } else {
@@ -152,7 +163,7 @@ class JadxEngine(
         // The worker holds [lock] for the whole load, so any tool call that lands meanwhile blocks
         // until the state is fully published instead of reading a half-torn-down engine.
         val worker = Thread {
-            locked {
+            write {
                 try {
                     doLoadApk(path)
                     currentApkPath = path
@@ -230,7 +241,7 @@ class JadxEngine(
 
     // ── Loading ──────────────────────────────────────────────
 
-    fun loadApk(path: String): ApkInfo = locked { doLoadApk(path) }
+    fun loadApk(path: String): ApkInfo = write { doLoadApk(path) }
 
     private fun doLoadApk(path: String): ApkInfo {
         val file = File(path)
@@ -315,17 +326,17 @@ class JadxEngine(
         packageName = guessPackageName(),
     )
 
-    fun serverInfo() = locked { ServerInfo(
+    fun serverInfo() = ServerInfo(
         revoidVersion = REVOID_VERSION,
         jadxVersion = JadxDecompiler.getVersion(),
         capabilities = mapOf("editing" to true, "pagination" to true),
         loadState = loadState.name.lowercase(),
         loadedApk = currentApkPath,
-    ) }
+    )
 
     // ── Classes ──────────────────────────────────────────────
 
-    fun listClasses(filter: String? = null, limit: Int = 50, offset: Int = 0): PaginatedClasses = locked {
+    fun listClasses(filter: String? = null, limit: Int = 50, offset: Int = 0): PaginatedClasses = read {
         requireLoaded()
         val all = classIndex.values.filter {
             filter.isNullOrBlank() || it.fullName.startsWith(filter, true) || it.rawName.startsWith(filter, true)
@@ -339,7 +350,7 @@ class JadxEngine(
         endLine: Int? = null,
         lineNumbers: Boolean = false,
         maxChars: Int = DEFAULT_MAX_CHARS,
-    ): String = locked {
+    ): String = read {
         requireLoaded()
         val lines = getCachedSource(findClass(className)).lines()
         val total = lines.size
@@ -358,7 +369,7 @@ class JadxEngine(
             "Use start_line/end_line to read more]"
     }
 
-    fun getClassSummary(className: String): ClassSummary = locked {
+    fun getClassSummary(className: String): ClassSummary = read {
         requireLoaded()
         val classNode = findClassNode(className)
         return ClassSummary(
@@ -376,30 +387,43 @@ class JadxEngine(
         )
     }
 
-    fun searchClasses(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedClasses = locked {
+    fun searchClasses(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedClasses = read {
         requireLoaded()
         val match = matcher(query, isRegex)
         val all = classIndex.values.filter { match(it.fullName) || match(it.rawName) }.sortedBy { it.fullName }
         return pageClasses(all, limit, offset)
     }
 
-    fun searchClassesByKeyword(keyword: String, limit: Int = 50, offset: Int = 0): PaginatedClasses = locked {
+    fun searchClassesByKeyword(keyword: String, limit: Int = 50, offset: Int = 0): PaginatedClasses = read {
         requireLoaded()
         val lower = keyword.lowercase()
-        val all = classIndex.values.filter { !it.isInner && getCachedSource(javaClassOf(it)).lowercase().contains(lower) }
-            .sortedBy { it.fullName }
-        return pageClasses(all, limit, offset)
+        val deadline = System.currentTimeMillis() + toolTimeoutMs()
+        val all = mutableListOf<ClassNode>()
+        var truncated = false
+        for (cls in classIndex.values) {
+            if (cls.isInner) continue
+            if (System.currentTimeMillis() > deadline || Thread.currentThread().isInterrupted) {
+                truncated = true
+                break
+            }
+            try {
+                if (getCachedSource(javaClassOf(cls)).lowercase().contains(lower)) all.add(cls)
+            } catch (e: Exception) {
+                log.debug("Keyword search failed for {}: {}", cls.rawName, e.message)
+            }
+        }
+        return pageClasses(all.sortedBy { it.fullName }, limit, offset, truncated)
     }
 
     // ── Methods & fields ─────────────────────────────────────
 
-    fun listMethods(className: String, limit: Int = 50, offset: Int = 0): PaginatedMethods = locked {
+    fun listMethods(className: String, limit: Int = 50, offset: Int = 0): PaginatedMethods = read {
         requireLoaded()
         val methods = findClassNode(className).methods.map { methodInfo(javaMethodOf(it)) }
         return PaginatedMethods(methods.page(limit, offset), methods.size, limit, offset)
     }
 
-    fun getMethodSource(className: String, methodName: String, methodId: String? = null): String = locked {
+    fun getMethodSource(className: String, methodName: String, methodId: String? = null): String = read {
         requireLoaded()
         val cls = findClass(className)
         val source = getCachedSource(cls)
@@ -419,7 +443,7 @@ class JadxEngine(
         else results.joinToString("\n\n")
     }
 
-    fun getFieldsOfClass(className: String): List<FieldInfo> = locked {
+    fun getFieldsOfClass(className: String): List<FieldInfo> = read {
         requireLoaded()
         return findClass(className).fields.map { field ->
             val mods = field.accessFlags
@@ -433,13 +457,13 @@ class JadxEngine(
         }
     }
 
-    fun getSmaliOfClass(className: String): String = locked {
+    fun getSmaliOfClass(className: String): String = read {
         requireLoaded()
         return findClass(className).smali ?: "// Smali generation failed or unsupported."
     }
 
     /** Smali `.method` declaration lines (access flags + name + descriptor) for every method in the class. */
-    fun getSmaliMethodSignatures(className: String): List<String> = locked {
+    fun getSmaliMethodSignatures(className: String): List<String> = read {
         requireLoaded()
         val smali = findClass(className).smali ?: return emptyList()
         return smali.lines().map { it.trim() }
@@ -448,14 +472,14 @@ class JadxEngine(
     }
 
     /** Import lines from the class's decompiled source (fully-qualified; `static` kept, `;` stripped). */
-    fun getClassImports(className: String): List<String> = locked {
+    fun getClassImports(className: String): List<String> = read {
         requireLoaded()
         return getCachedSource(findClass(className)).lines().map { it.trim() }
             .filter { it.startsWith("import ") }
             .map { it.removePrefix("import ").removeSuffix(";").trim() }
     }
 
-    fun searchMethodByName(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedMethods = locked {
+    fun searchMethodByName(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedMethods = read {
         requireLoaded()
         val match = matcher(query, isRegex)
         val methods = methodIndex.values
@@ -468,68 +492,44 @@ class JadxEngine(
     // ── Strings ──────────────────────────────────────────────
 
     /**
-     * Search string literals in decompiled source; for methods that failed to decompile,
-     * fall back to const-string instructions in the smali.
+     * Search raw dex string literals (`const-string`) collected at load. This never decompiles a
+     * class, so a large APK cannot turn one search into a multi-minute scan.
      */
-    fun searchStrings(query: String, limit: Int = 50, offset: Int = 0): PaginatedStringMatches = locked {
+    fun searchStrings(query: String, limit: Int = 50, offset: Int = 0): PaginatedStringMatches = read {
         requireLoaded()
-        val results = mutableListOf<StringMatch>()
         val lowerQuery = query.lowercase()
-
-        for (cls in classIndex.values.sortedBy { it.rawName }) {
-            try {
-                val jcls = javaClassOf(cls)
-                val source = getCachedSource(jcls)
-                if (!cls.isInner) {
-                    for ((idx, line) in source.lines().withIndex()) {
-                        if (!line.contains('"') || !line.lowercase().contains(lowerQuery)) continue
-                        for (literal in extractStringLiterals(line)) {
-                            if (literal.lowercase().contains(lowerQuery)) {
-                                results.add(StringMatch(literal, cls.fullName, idx + 1))
-                            }
-                        }
-                    }
-                }
-                val failed = cls.methods.filter { it.contains(AType.JADX_ERROR) }
-                    .associateBy { it.methodInfo.shortId }
-                if (failed.isNotEmpty()) {
-                    var current: String? = null
-                    for ((idx, line) in (jcls.smali ?: "").lines().withIndex()) {
-                        val t = line.trim()
-                        if (t.startsWith(".method ")) current = t.substringAfterLast(' ')
-                        else if (t == ".end method") current = null
-                        else if (current in failed && t.startsWith("const-string") && t.lowercase().contains(lowerQuery)) {
-                            for (literal in extractStringLiterals(t)) {
-                                if (literal.lowercase().contains(lowerQuery)) {
-                                    results.add(StringMatch(literal, cls.fullName, idx + 1, "smali", mid(failed[current]!!)))
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                log.debug("Failed to search strings in {}: {}", cls.rawName, e.message)
+        val deadline = System.currentTimeMillis() + toolTimeoutMs()
+        val results = mutableListOf<StringMatch>()
+        var truncated = false
+        for (m in stringIndex()) {
+            if ((results.size and 0x3FF) == 0 &&
+                (System.currentTimeMillis() > deadline || Thread.currentThread().isInterrupted)) {
+                truncated = true
+                break
             }
+            if (!m.value.lowercase().contains(lowerQuery)) continue
+            val raw = m.className
+            results.add(m.copy(className = classIndex[raw]?.fullName ?: raw))
         }
-        return PaginatedStringMatches(results.page(limit, offset), results.size, limit, offset)
+        return PaginatedStringMatches(results.page(limit, offset), results.size, limit, offset, truncated)
     }
 
     // ── Resources & Manifest ─────────────────────────────────
 
-    fun getAllResourceFileNames(limit: Int = 50, offset: Int = 0): PaginatedStrings = locked {
+    fun getAllResourceFileNames(limit: Int = 50, offset: Int = 0): PaginatedStrings = read {
         requireLoaded()
         val names = decompiler?.resources?.map { it.originalName } ?: emptyList()
         return PaginatedStrings(names.page(limit, offset), names.size, limit, offset)
     }
 
-    fun getResourceFile(name: String): String = locked {
+    fun getResourceFile(name: String): String = read {
         requireLoaded()
         val res = decompiler?.resources?.find { it.originalName == name }
             ?: throw IllegalArgumentException("Resource file '$name' not found.")
         return res.loadContent().text?.codeStr ?: "// Resource could not be decoded as text."
     }
 
-    fun getResourceStrings(limit: Int = 50, offset: Int = 0): PaginatedResourceStrings = locked {
+    fun getResourceStrings(limit: Int = 50, offset: Int = 0): PaginatedResourceStrings = read {
         requireLoaded()
         val res = decompiler?.resources?.find { it.originalName.endsWith("res/values/strings.xml") }
             ?: throw IllegalArgumentException("strings.xml not found. Are resources parsed?")
@@ -539,7 +539,7 @@ class JadxEngine(
         return PaginatedResourceStrings(results.page(limit, offset), results.size, limit, offset)
     }
 
-    internal fun getAndroidManifest(): String = locked {
+    internal fun getAndroidManifest(): String = read {
         requireLoaded()
         manifestCache?.let { return it }
         val res = decompiler?.resources?.find { it.originalName == "AndroidManifest.xml" }
@@ -572,7 +572,7 @@ class JadxEngine(
     }
 
     /** Components of one manifest tag (`activity`, `activity-alias`, `service`, ...); names are resolved to full class names. */
-    fun getManifestComponent(componentType: String): List<ManifestComponent> = locked {
+    fun getManifestComponent(componentType: String): List<ManifestComponent> = read {
         val root = manifestRoot()
         val pkg = root.getAttribute("package")
         return elements(root, componentType).map { e ->
@@ -585,11 +585,11 @@ class JadxEngine(
         }
     }
 
-    fun getManifestActivities(): List<ManifestComponent> = locked {
+    fun getManifestActivities(): List<ManifestComponent> = read {
         getManifestComponent("activity") + getManifestComponent("activity-alias")
     }
 
-    fun getManifestPermissions(): List<String> = locked {
+    fun getManifestPermissions(): List<String> = read {
         val root = manifestRoot()
         return listOf("uses-permission", "uses-permission-sdk-23")
             .flatMap { tag -> elements(root, tag) }
@@ -597,12 +597,12 @@ class JadxEngine(
             .filter { it.isNotEmpty() }
     }
 
-    fun getManifestExportedComponents(): List<ManifestComponent> = locked {
+    fun getManifestExportedComponents(): List<ManifestComponent> = read {
         (getManifestActivities() + listOf("service", "receiver", "provider").flatMap { getManifestComponent(it) })
             .filter { it.exported == true }
     }
 
-    fun getMainActivityClass(): String = locked {
+    fun getMainActivityClass(): String = read {
         val root = manifestRoot()
         val pkg = root.getAttribute("package")
         // (class, isLauncher) for every MAIN entry point; LAUNCHER wins over LEANBACK_LAUNCHER
@@ -623,7 +623,7 @@ class JadxEngine(
             ?: throw IllegalArgumentException("No main activity found in manifest")
     }
 
-    fun getMainApplicationClassesNames(): List<String> = locked {
+    fun getMainApplicationClassesNames(): List<String> = read {
         val pkg = manifestRoot().getAttribute("package")
             .ifEmpty { throw IllegalArgumentException("Package name not found in manifest") }
         return classIndex.values.map { it.fullName }.filter { it.startsWith("$pkg.") }.sorted()
@@ -643,17 +643,17 @@ class JadxEngine(
         return PaginatedXrefs(uses.page(limit, offset), uses.size, limit, offset)
     }
 
-    fun xrefsToClass(className: String, limit: Int = 50, offset: Int = 0): PaginatedXrefs = locked {
+    fun xrefsToClass(className: String, limit: Int = 50, offset: Int = 0): PaginatedXrefs = read {
         requireLoaded()
         return xrefs(findClass(className).useIn, limit, offset)
     }
 
-    fun xrefsToMethod(methodSignature: String, limit: Int = 50, offset: Int = 0, exact: Boolean = true): PaginatedXrefs = locked {
+    fun xrefsToMethod(methodSignature: String, limit: Int = 50, offset: Int = 0, exact: Boolean = true): PaginatedXrefs = read {
         requireLoaded()
         return xrefs(resolveMethod(methodSignature, exact).useIn, limit, offset)
     }
 
-    fun xrefsToField(className: String, fieldName: String, limit: Int = 50, offset: Int = 0): PaginatedXrefs = locked {
+    fun xrefsToField(className: String, fieldName: String, limit: Int = 50, offset: Int = 0): PaginatedXrefs = read {
         requireLoaded()
         val cls = findClass(className)
         val field = fieldIndex[cls.rawName + "#" + fieldName]?.let { javaFieldOf(it) }
@@ -664,7 +664,7 @@ class JadxEngine(
 
     // ── Call graph ───────────────────────────────────────────
 
-    fun getCallers(methodSignature: String, exact: Boolean = true, limit: Int = 50, offset: Int = 0): PaginatedMethodRefs = locked {
+    fun getCallers(methodSignature: String, exact: Boolean = true, limit: Int = 50, offset: Int = 0): PaginatedMethodRefs = read {
         requireLoaded()
         val refs = resolveMethod(methodSignature, exact).useIn
             .filterIsInstance<JavaMethod>()
@@ -673,7 +673,7 @@ class JadxEngine(
         return PaginatedMethodRefs(refs.page(limit, offset), refs.size, limit, offset)
     }
 
-    fun getCallees(methodSignature: String, exact: Boolean = true, limit: Int = 50, offset: Int = 0): PaginatedMethodRefs = locked {
+    fun getCallees(methodSignature: String, exact: Boolean = true, limit: Int = 50, offset: Int = 0): PaginatedMethodRefs = read {
         requireLoaded()
         val mNode = resolveMethod(methodSignature, exact).methodNode
         if (mNode.instructions == null) {
@@ -699,12 +699,12 @@ class JadxEngine(
     // ── Live editing ─────────────────────────────────────────
 
     /** Resolve a display/raw name (and optional member) to a raw jadx node reference. */
-    fun resolveNode(className: String, member: String? = null, fuzzy: Boolean = false): RefInfo = locked {
+    fun resolveNode(className: String, member: String? = null, fuzzy: Boolean = false): RefInfo = read {
         requireLoaded()
         return refInfo(nodeRef(resolveMember(findClass(className, fuzzy), member)))
     }
 
-    fun renameNode(className: String, member: String?, newName: String): EditResult = locked {
+    fun renameNode(className: String, member: String?, newName: String): EditResult = write {
         requireLoaded()
         val cls = findClass(className)
         getCachedSource(cls) // anonymous/inline flags are only known after decompilation
@@ -723,7 +723,7 @@ class JadxEngine(
         return EditResult(refInfo(ref), describe(node), old, node.name, refreshed)
     }
 
-    fun addComment(className: String, member: String?, text: String, style: String? = null): EditResult = locked {
+    fun addComment(className: String, member: String?, text: String, style: String? = null): EditResult = write {
         requireLoaded()
         require(text.isNotBlank()) { "Comment text is empty" }
         val cls = findClass(className)
@@ -740,7 +740,7 @@ class JadxEngine(
         return EditResult(refInfo(ref), describe(node), null, null, applyEdit(listOf(node)))
     }
 
-    fun listAnnotations(): List<AnnotationInfo> = locked {
+    fun listAnnotations(): List<AnnotationInfo> = read {
         requireLoaded()
         val out = mutableListOf<AnnotationInfo>()
         for (r in renames) {
@@ -755,7 +755,7 @@ class JadxEngine(
     }
 
     /** Remove one annotation by its index in the current [listAnnotations] output (indexes shift after removal). */
-    fun removeAnnotation(index: Int): EditResult = locked {
+    fun removeAnnotation(index: Int): EditResult = write {
         requireLoaded()
         val all = listAnnotations()
         require(index in all.indices) { "No annotation with index $index (have ${all.size})" }
@@ -767,7 +767,7 @@ class JadxEngine(
         return EditResult(a.ref, a.target ?: "", null, null, refreshed)
     }
 
-    fun saveProject(path: String): ProjectResult = locked {
+    fun saveProject(path: String): ProjectResult = write {
         requireLoaded()
         val root = outputRoot()
         val target = (if (File(path).isAbsolute) File(path) else File(root, path)).canonicalFile
@@ -805,7 +805,7 @@ class JadxEngine(
     }
 
     /** Replace current renames/comments with those in a jadx-gui .jadx project file and reload affected classes. */
-    fun loadProject(path: String): ProjectResult = locked {
+    fun loadProject(path: String): ProjectResult = write {
         requireLoaded()
         val file = File(path)
         require(file.isFile) { "Not a file: $path" }
@@ -1169,6 +1169,50 @@ class JadxEngine(
         log.info("Indexed {} classes, {} methods", classIndex.size, methodIndex.size)
     }
 
+    /**
+     * Collect every string literal from the raw model. Loading method instructions is far cheaper
+     * than decompiling each class, and it makes search_strings a pure in-memory filter.
+     * Built lazily because some methods only become loadable after the full load completes.
+     */
+    private fun stringIndex(): List<StringMatch> {
+        stringIndex?.let { return it }
+        return stringIndexLock.withLock {
+            stringIndex ?: buildStringIndex().also { stringIndex = it }
+        }
+    }
+
+    private fun buildStringIndex(): List<StringMatch> {
+        val out = ArrayList<StringMatch>()
+        for (m in methodIndex.values) {
+            val insns = decompileLock.withLock {
+                m.instructions ?: try {
+                    m.unload()
+                    m.load()
+                    m.instructions
+                } catch (_: Exception) {
+                    null
+                }
+            } ?: continue
+            for (insn in insns) {
+                for (literal in stringLiteralsOf(insn)) {
+                    out.add(StringMatch(literal, m.declaringClass.rawName, origin = "dex", methodId = mid(m)))
+                }
+            }
+        }
+        return out
+    }
+
+    /** `const-string` plus literals embedded in string-concat instructions (`STR_CONCAT`). */
+    private fun stringLiteralsOf(insn: jadx.core.dex.nodes.InsnNode?): List<String> {
+        if (insn == null) return emptyList()
+        val out = mutableListOf<String>()
+        if (insn is ConstStringNode) insn.string?.let(out::add)
+        for (arg in insn.argList) {
+            if (arg is InsnWrapArg) out.addAll(stringLiteralsOf(arg.wrapInsn))
+        }
+        return out
+    }
+
     /** Rebuild the display-name lookup; remember any display name that changed so it keeps resolving. */
     private fun refreshNames() {
         displayIndex.clear()
@@ -1190,19 +1234,21 @@ class JadxEngine(
         classIndex.clear(); methodIndex.clear(); fieldIndex.clear(); displayIndex.clear()
         oldClassNames.clear(); lastClassName.clear(); lastMemberName.clear(); oldMemberNames.clear()
         sourceCache.clear(); renames.clear(); comments.clear()
+        stringIndex = null
         manifestCache = null
     }
 
     private fun getCachedSource(cls: JavaClass): String {
         val top = cls.topParentClass
-        return sourceCache.getOrPut(top.rawName) {
-            try {
+        sourceCache[top.rawName]?.let { return it }
+        return decompileLock.withLock {
+            sourceCache[top.rawName] ?: try {
                 val code = top.code
                 decompileCounter.incrementAndGet()
-                code ?: "// Decompilation failed for ${top.fullName}"
+                (code ?: "// Decompilation failed for ${top.fullName}").also { sourceCache[top.rawName] = it }
             } catch (e: Exception) {
                 log.warn("Decompilation failed for {}: {}", top.fullName, e.message)
-                "// Decompilation failed: ${e.message}"
+                "// Decompilation failed: ${e.message}".also { sourceCache[top.rawName] = it }
             }
         }
     }
@@ -1235,8 +1281,8 @@ class JadxEngine(
         return "${method.declaringClass.fullName}.${method.name}($params):${method.returnType ?: "void"}"
     }
 
-    private fun pageClasses(all: List<ClassNode>, limit: Int, offset: Int) =
-        PaginatedClasses(all.page(limit, offset).map { ClassRef(it.fullName, it.rawName) }, all.size, limit, offset)
+    private fun pageClasses(all: List<ClassNode>, limit: Int, offset: Int, truncated: Boolean = false) =
+        PaginatedClasses(all.page(limit, offset).map { ClassRef(it.fullName, it.rawName) }, all.size, limit, offset, truncated)
 
     private fun <T> List<T>.page(limit: Int, offset: Int) = drop(offset.coerceAtLeast(0)).take(limit.coerceAtLeast(0))
 
@@ -1280,24 +1326,6 @@ class JadxEngine(
         return null
     }
 
-    private fun extractStringLiterals(line: String): List<String> {
-        val literals = mutableListOf<String>()
-        var i = 0
-        while (i < line.length) {
-            if (line[i] == '"') {
-                val sb = StringBuilder()
-                i++
-                while (i < line.length && line[i] != '"') {
-                    if (line[i] == '\\' && i + 1 < line.length) { sb.append(line[i]).append(line[i + 1]); i += 2 }
-                    else { sb.append(line[i]); i++ }
-                }
-                literals.add(sb.toString())
-            }
-            i++
-        }
-        return literals
-    }
-
     private fun isAndroidComponent(classNode: ClassNode, componentType: String): Boolean {
         if (classNode.superClass?.toString()?.contains(componentType) == true) return true
         return classNode.interfaces?.any { it.toString().contains(componentType) } ?: false
@@ -1309,7 +1337,7 @@ class JadxEngine(
             .mapNotNull { n -> n.split(".").takeIf { it.size >= 3 }?.take(3)?.joinToString(".") }
             .groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
 
-    fun close() = locked {
+    fun close() = write {
         doClose()
         // Keep the state machine in sync with the decompiler: READY must never survive teardown,
         // otherwise load_status lies while every analysis tool reports "No APK loaded".
@@ -1332,5 +1360,9 @@ class JadxEngine(
 
     companion object {
         const val DEFAULT_MAX_CHARS = 60_000
+
+        /** Hard ceiling for scans that can touch every class; keeps a tool call under the MCP timeout. */
+        private fun toolTimeoutMs(): Long =
+            (System.getenv("REVOID_TOOL_TIMEOUT_S")?.toLongOrNull() ?: 120L) * 1000
     }
 }
