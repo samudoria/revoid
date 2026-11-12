@@ -67,6 +67,40 @@ class JadxEngineTest {
     }
 
     @Test
+    fun testIndexedSearchesDoNotDecompile() {
+        val lazy = JadxEngine(diskCacheEnabled = false)
+        val jar = java.nio.file.Files.createTempFile("revoid-indexed", ".jar").toFile()
+        jar.writeBytes(File("test-app/build/sample.jar").readBytes())
+        try {
+            lazy.loadApk(jar.absolutePath)
+            assertEquals(0, lazy.decompileCount(), "loading must not decompile any class")
+            assertTrue(lazy.searchClassesByKeyword("SUPER_SECRET").items.any { it.rawName == crypto })
+            assertTrue(lazy.searchMethodByName("login").items.any { it.fullSignature.contains("AuthManager") })
+            assertNotNull(lazy.searchStrings("SUPER_SECRET").items.find { it.value.contains("SUPER_SECRET_KEY") })
+            assertEquals(0, lazy.decompileCount(), "indexed searches must not decompile any class")
+        } finally {
+            lazy.close()
+            jar.delete()
+        }
+    }
+
+    @Test
+    fun testAddCommentDoesNotDecompileWholeApp() {
+        val lazy = JadxEngine(diskCacheEnabled = false)
+        val jar = java.nio.file.Files.createTempFile("revoid-comment", ".jar").toFile()
+        jar.writeBytes(File("test-app/build/sample.jar").readBytes())
+        try {
+            lazy.loadApk(jar.absolutePath)
+            lazy.addComment(crypto, null, "class-level note")
+            assertTrue(lazy.decompileCount() <= 1, "adding a comment must not decompile every class")
+            assertTrue(lazy.getClassSource(crypto).contains("class-level note"))
+        } finally {
+            lazy.close()
+            jar.delete()
+        }
+    }
+
+    @Test
     fun testCallGraph() {
         val callers = engine.getCallers(decrypt).items
         assertTrue(callers.any { it.signature.contains(".login(java.lang.String, java.lang.String):boolean") })

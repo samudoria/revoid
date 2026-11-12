@@ -28,7 +28,7 @@ fun registerTools(server: Server, engine: JadxEngine) {
     fun JsonObject?.off() = optInt("offset") ?: 0
 
     server.addTool("get_server_info", "Revoid and jadx versions plus capabilities (e.g. editing: true).", mkSchema {}) { _ ->
-        wrap { json.encodeToString(engine.serverInfo()) }
+        wrapFast { json.encodeToString(engine.serverInfo()) }
     }
 
     server.addTool("revoid_load_app",
@@ -40,7 +40,7 @@ fun registerTools(server: Server, engine: JadxEngine) {
         wrap { json.encodeToString(engine.loadApkAsync(req.arguments.str("apk_path"))) }
     }
     server.addTool("load_status", "Progress of revoid_load_app: idle, loading, loaded (with class count) or error.", mkSchema {}) { _ ->
-        wrap { json.encodeToString(engine.loadStatus()) }
+        wrapFast { json.encodeToString(engine.loadStatus()) }
     }
 
     server.addTool("list_classes",
@@ -84,14 +84,14 @@ fun registerTools(server: Server, engine: JadxEngine) {
     }
 
     server.addTool("search_classes",
-        "Search class names (display or raw) by substring or regex.",
+        "Preferred search: class names (display or raw) by substring or regex. Pass a concrete class/package query.",
         mkSchema { required("query"); prop("query", "string", "Search query"); prop("is_regex", "boolean", "Treat as regex (default: false)"); paging() }
     ) { req ->
         wrap { json.encodeToString(engine.searchClasses(req.arguments.str("query"), req.arguments.optBool("is_regex") ?: false, req.arguments.lim(), req.arguments.off())) }
     }
 
     server.addTool("search_strings",
-        "Search string constants from the raw dex (const-string) across all classes. Fast; does not decompile.",
+        "Streaming search over the prebuilt dex string index; bounded and paginated. Avoid broad queries on large apps.",
         mkSchema { required("query"); prop("query", "string", "Substring to search"); paging() }
     ) { req ->
         wrap { json.encodeToString(engine.searchStrings(req.arguments.str("query"), req.arguments.lim(), req.arguments.off())) }
@@ -113,11 +113,12 @@ fun registerTools(server: Server, engine: JadxEngine) {
         wrap { json.encodeToString(engine.getCallees(req.arguments.str("method_signature"), req.arguments.optBool("exact") ?: true, req.arguments.lim(), req.arguments.off())) }
     }
 
-    server.addTool("search_method_by_name", "Search methods across classes by name (display or raw).",
+    server.addTool("search_method_by_name", "Index-backed method name search (display or raw), paginated.",
         mkSchema { required("query"); prop("query", "string", "Method name"); prop("is_regex", "boolean", "Treat as regex"); paging() }) { req ->
         wrap { json.encodeToString(engine.searchMethodByName(req.arguments.str("query"), req.arguments.optBool("is_regex") ?: false, req.arguments.lim(), req.arguments.off())) }
     }
-    server.addTool("search_classes_by_keyword", "Search for classes whose source contains a keyword",
+    server.addTool("search_classes_by_keyword",
+        "Index-backed keyword search over class/member names and dex strings; bounded and paginated.",
         mkSchema { required("keyword"); prop("keyword", "string", "Keyword"); paging() }) { req ->
         wrap { json.encodeToString(engine.searchClassesByKeyword(req.arguments.str("keyword"), req.arguments.lim(), req.arguments.off())) }
     }
@@ -184,7 +185,7 @@ fun registerTools(server: Server, engine: JadxEngine) {
     }
 
     server.addTool("get_main_activity_class", "Fetch main activity from AndroidManifest", mkSchema {}) { req ->
-        wrap { engine.getMainActivityClass() }
+        wrapFast { engine.getMainActivityClass() }
     }
 
     server.addTool("get_main_application_classes_names", "Fetch all the main application classes names", mkSchema {}) { req ->
@@ -208,7 +209,7 @@ fun registerTools(server: Server, engine: JadxEngine) {
     server.addTool("get_manifest_exported_components", "Retrieve all exported components from AndroidManifest", mkSchema {}) { req ->
         wrap { json.encodeToString(engine.getManifestExportedComponents()) }
     }
-    server.addTool("get_resource_strings", "Fetches paginated resource strings from strings.xml", mkSchema { prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
+    server.addTool("get_resource_strings", "Paginated resource strings from strings.xml (requires REVOID_PARSE_RESOURCES=1 at load)", mkSchema { prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
         wrap { json.encodeToString(engine.getResourceStrings(req.arguments.optInt("limit") ?: 50, req.arguments.optInt("offset") ?: 0)) }
     }
     server.addTool("get_all_resource_file_names", "Retrieve all resource file names", mkSchema { prop("limit", "integer", "Limit (default 50)"); prop("offset", "integer", "Offset (default 0)") }) { req ->
@@ -230,26 +231,31 @@ fun registerTools(server: Server, engine: JadxEngine) {
 }
 
 private suspend fun wrap(block: () -> String): CallToolResult = toolSemaphore.withPermit {
-    withContext(Dispatchers.IO) {
-        try {
-            CallToolResult(content = listOf(TextContent(block())))
-        } catch (e: LoadingException) {
-            // Soft "initializing" response instead of a hard error: the load is in progress, not failed.
-            // Agents should poll load_status and retry after retry_after_s seconds.
-            CallToolResult(content = listOf(TextContent(buildJsonObject {
-                put("status", "initializing")
-                put("state", e.state)
-                put("retry_after_s", e.retryAfterS)
-                put("hint", e.message)
-            }.toString())))
-        } catch (e: IllegalArgumentException) {
-            CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
-        } catch (e: IllegalStateException) {
-            CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
-        } catch (e: Exception) {
-            log.error("Tool error", e)
-            CallToolResult(content = listOf(TextContent("Internal error: ${e.javaClass.simpleName}: ${e.message}")), isError = true)
-        }
+    runTool(block)
+}
+
+/** Status/metadata tools must never queue behind a long analysis call. */
+private suspend fun wrapFast(block: () -> String): CallToolResult = runTool(block)
+
+private suspend fun runTool(block: () -> String): CallToolResult = withContext(Dispatchers.IO) {
+    try {
+        CallToolResult(content = listOf(TextContent(block())))
+    } catch (e: LoadingException) {
+        // Soft "initializing" response instead of a hard error: the load is in progress, not failed.
+        // Agents should poll load_status and retry after retry_after_s seconds.
+        CallToolResult(content = listOf(TextContent(buildJsonObject {
+            put("status", "initializing")
+            put("state", e.state)
+            put("retry_after_s", e.retryAfterS)
+            put("hint", e.message)
+        }.toString())))
+    } catch (e: IllegalArgumentException) {
+        CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
+    } catch (e: IllegalStateException) {
+        CallToolResult(content = listOf(TextContent("Error: ${e.message}")), isError = true)
+    } catch (e: Exception) {
+        log.error("Tool error", e)
+        CallToolResult(content = listOf(TextContent("Internal error: ${e.javaClass.simpleName}: ${e.message}")), isError = true)
     }
 }
 

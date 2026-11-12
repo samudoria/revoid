@@ -119,10 +119,10 @@ Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/o
 | `get_fields_of_class` | List all fields in a class with their types and access modifiers. |
 | `get_smali_method_signatures` | List the smali method signatures (access flags + name + descriptor) of a class. |
 | `get_class_summary` | Get a structured summary (superclass, interfaces, component type). |
-| `search_classes` | Search for classes by name using substring or regex matching. |
-| `search_classes_by_keyword` | Search for classes whose source code contains a specific keyword. |
-| `search_method_by_name` | Search methods across all classes by substring or regex. |
-| `search_strings` | Search string constants from the raw dex (`const-string`) across all classes. Fast; does not decompile. |
+| `search_classes` | Preferred search: classes by name using substring or regex. Pass a concrete query. |
+| `search_classes_by_keyword` | Index-backed keyword search over class/member names and dex strings; bounded and paginated. |
+| `search_method_by_name` | Index-backed method name search, paginated. |
+| `search_strings` | Streaming search over the prebuilt dex string index; bounded and paginated. |
 | `get_callers` | Methods that call a target (exact by default; `exact=false` for substring). Paginated. |
 | `get_callees` | Get all methods called by a given method. |
 | `get_server_info` | Revoid/jadx versions and capabilities (`editing: true`). |
@@ -177,6 +177,9 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 | `REVOID_CACHE_MAX_MB` | Total cache size cap; oldest entries are evicted (default `1024`) |
 | `REVOID_PRELOAD_APK` | APK path to load in the background as soon as the server starts (both STDIO and SSE), so a connecting agent finds it already `loading`/`ready` via `load_status` instead of a cold `revoid_load_app`. Ignored (with a warning) if the path is unreadable |
 | `REVOID_TOOL_TIMEOUT_S` | Deadline for full-app scans such as `search_classes_by_keyword` (default `120`). Partial results are returned with `truncated: true` |
+| `REVOID_SEARCH_MAX_RESULTS` | Maximum matches materialized per search (default `10000`). Further matches set `truncated: true` |
+| `REVOID_KEYWORD_INDEX_MAX_ENTRIES` | Cap on keyword-index entries (default `500000`) to bound memory |
+| `REVOID_PARSE_RESOURCES` | Set `1` to parse resources at load. Required for `get_resource_strings`; otherwise it returns `available: false` with a clear message |
 | `REVOID_MAX_CONCURRENT_TOOLS` | Maximum tool handlers running at once (default `4`). Extra calls wait instead of exhausting server threads |
 
 

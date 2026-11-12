@@ -182,6 +182,8 @@ data class PaginatedMethods(
     val totalCount: Int,
     val limit: Int,
     val offset: Int,
+    /** True when the scan stopped at a cap/deadline and the result is partial. */
+    val truncated: Boolean = false,
 )
 
 @Serializable
@@ -214,5 +216,8 @@ data class PaginatedResourceStrings(
     val totalCount: Int,
     val limit: Int,
     val offset: Int,
+    /** False when resources were not parsed for this load. */
+    val available: Boolean = true,
+    val message: String? = null,
 )
 
