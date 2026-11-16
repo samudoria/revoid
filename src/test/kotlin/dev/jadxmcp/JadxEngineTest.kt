@@ -1,5 +1,6 @@
 package dev.jadxmcp
 
+import kotlinx.serialization.json.*
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeAll
@@ -238,6 +239,42 @@ class JadxEngineTest {
         assertTrue(engine.searchClasses("Crypto").items.any { it.rawName == crypto })
         assertTrue(engine.searchMethodByName("login").items.any { it.fullSignature.contains("AuthManager") })
         assertTrue(engine.searchClassesByKeyword("SUPER_SECRET").items.any { it.rawName == crypto })
+    }
+
+    @Test
+    fun testGuiCompatibilityTools() {
+        val tree = engine.getSymbolTree()
+        assertEquals(true, tree["success"]!!.jsonPrimitive.boolean)
+        assertEquals(engine.listClasses(limit = 10_000).totalCount, tree["total_symbols"]!!.jsonPrimitive.int)
+        val classLeaves = tree["root"]!!.jsonArray.flatMap { collectClassLeaves(it) }
+        assertTrue(classLeaves.any { it == crypto })
+
+        val classSource = engine.getSymbolSource(crypto)
+        assertEquals(true, classSource["success"]!!.jsonPrimitive.boolean)
+        assertTrue(classSource["source"]!!.jsonPrimitive.content.contains("class Crypto"))
+
+        val methodSource = engine.getSymbolSource("$crypto#decrypt")
+        assertEquals(true, methodSource["success"]!!.jsonPrimitive.boolean)
+        assertTrue(methodSource["source"]!!.jsonPrimitive.content.contains("decrypt"))
+
+        val missing = engine.getSymbolSource("com.example.DoesNotExist")
+        assertEquals(false, missing["success"]!!.jsonPrimitive.boolean)
+        assertTrue(missing["content"]!!.jsonPrimitive.content.startsWith("class not found:"))
+
+        val search = engine.searchSymbols("MainActivity")
+        val results = search["results"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(results.any { it["node_type"]!!.jsonPrimitive.content == "class" })
+        assertTrue(results.any { it["node_type"]!!.jsonPrimitive.content == "method" })
+        assertTrue(results.all { it["full_name"]!!.jsonPrimitive.content.isNotBlank() })
+    }
+
+    private fun collectClassLeaves(element: JsonElement): List<String> {
+        val node = element.jsonObject
+        return if (node["node_type"]!!.jsonPrimitive.content == "class") {
+            listOf(node["full_name"]!!.jsonPrimitive.content)
+        } else {
+            (node["children"]?.jsonArray ?: JsonArray(emptyList())).flatMap { collectClassLeaves(it) }
+        }
     }
 
     @Test

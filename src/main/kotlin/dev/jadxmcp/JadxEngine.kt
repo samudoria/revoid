@@ -360,6 +360,161 @@ class JadxEngine(
         loadedApk = currentApkPath,
     )
 
+    // ── GUI compatibility ───────────────────────────────────
+
+    private fun loadingJson(content: String): JsonObject = buildJsonObject {
+        put("status", "initializing")
+        put("content", content)
+        put("was_evicted", false)
+    }
+
+    /** Null when a loaded app is available; otherwise the response the GUI expects. */
+    private fun notReadyJson(): JsonObject? = when {
+        loadState == LoadState.LOADING -> loadingJson("loading ...")
+        loadState == LoadState.IDLE -> buildJsonObject {
+            put("success", false)
+            put("content", "no app loaded; call revoid_load_app first")
+        }
+        loadState == LoadState.ERROR -> buildJsonObject {
+            put("success", false)
+            put("content", "load failed: ${loadError ?: "unknown error"}")
+        }
+        decompiler == null -> loadingJson("loading ...")
+        else -> null
+    }
+
+    /** Package/class tree for GUI symbol browsers. */
+    fun getSymbolTree(): JsonObject = read {
+        notReadyJson()?.let { return it }
+        val root = SymbolTreeNode("", "", "package")
+        for (raw in classIndex.keys) {
+            val pkg = raw.substringBeforeLast('.', "")
+            val simple = raw.substringAfterLast('.')
+            var node = root
+            var full = ""
+            for (seg in pkg.split('.').filter { it.isNotEmpty() }) {
+                full = if (full.isEmpty()) seg else "$full.$seg"
+                node = node.children.getOrPut("p:$seg") { SymbolTreeNode(seg, full, "package") }
+            }
+            node.children.getOrPut("c:$simple") { SymbolTreeNode(simple, raw, "class") }
+        }
+        return buildJsonObject {
+            put("success", true)
+            put("app_type", "android")
+            put("view_mode", "tree")
+            put("language", "java")
+            put("total_symbols", classIndex.size)
+            putJsonArray("root") { root.children.values.sortedBy { it.name }.forEach { add(it.toJson()) } }
+        }
+    }
+
+    /** Whole class source, or a single method when [symbolName] contains `#`. */
+    fun getSymbolSource(
+        symbolName: String,
+        maxChars: Int = DEFAULT_METHOD_MAX_CHARS,
+        offset: Int = 0,
+    ): JsonObject = read {
+        notReadyJson()?.let { return it }
+        val isMethod = '#' in symbolName
+        try {
+            val source = if (isMethod) {
+                getMethodSource(
+                    symbolName.substringBefore('#'),
+                    symbolName.substringAfter('#'),
+                    maxChars = maxChars,
+                    offset = offset,
+                )
+            } else {
+                window(getCachedSource(findClassLenient(symbolName)), offset, maxChars)
+            }
+            return buildJsonObject {
+                put("success", true)
+                put("language", "java")
+                put("symbol_name", symbolName)
+                put("source", source)
+            }
+        } catch (e: IllegalArgumentException) {
+            return buildJsonObject {
+                put("success", false)
+                put(
+                    "content",
+                    if (isMethod) (e.message ?: "method not found: $symbolName")
+                    else "class not found: $symbolName. ${e.message.orEmpty()}".trim(),
+                )
+            }
+        }
+    }
+
+    /** Combined class/method/field search for GUI symbol pickers. */
+    fun searchSymbols(query: String, limit: Int = 50): JsonObject = read {
+        notReadyJson()?.let { return it }
+        val q = query.trim()
+        val max = limit.coerceAtLeast(0)
+        val deadline = System.currentTimeMillis() + toolTimeoutMs()
+        val maxResults = maxSearchResults()
+        val matches = ArrayList<JsonObject>()
+        var scanned = 0
+        fun budgetOk(): Boolean {
+            if ((scanned++ and 0x3FF) != 0) return true
+            return System.currentTimeMillis() <= deadline && !Thread.currentThread().isInterrupted
+        }
+
+        if (q.isNotEmpty()) {
+            for (c in classIndex.values) {
+                if (!budgetOk()) break
+                if (!c.fullName.contains(q, true) && !c.rawName.contains(q, true)) continue
+                matches.add(symbolResult(c.fullName.substringAfterLast('.'), c.fullName, "class"))
+                if (matches.size >= maxResults) break
+            }
+            if (matches.size < maxResults) for (m in methodIndex.values) {
+                if (!budgetOk()) break
+                val cls = m.declaringClass.fullName
+                val name = m.alias
+                val full = "$cls#$name"
+                if (!name.contains(q, true) && !m.methodInfo.name.contains(q, true) && !full.contains(q, true)) continue
+                matches.add(symbolResult(name, full, "method"))
+                if (matches.size >= maxResults) break
+            }
+            if (matches.size < maxResults) for (f in fieldIndex.values) {
+                if (!budgetOk()) break
+                val cls = f.declaringClass.fullName
+                val name = f.alias
+                val full = "$cls#$name"
+                if (!name.contains(q, true) && !f.fieldInfo.name.contains(q, true) && !full.contains(q, true)) continue
+                matches.add(symbolResult(name, full, "field"))
+                if (matches.size >= maxResults) break
+            }
+        }
+
+        val sorted = matches.sortedBy { it["full_name"]?.jsonPrimitive?.content ?: "" }
+        return buildJsonObject {
+            put("success", true)
+            put("query", query)
+            put("total_found", sorted.size)
+            putJsonArray("results") { sorted.take(max).forEach { add(it) } }
+        }
+    }
+
+    private fun symbolResult(name: String, fullName: String, nodeType: String): JsonObject = buildJsonObject {
+        put("name", name)
+        put("full_name", fullName)
+        put("node_type", nodeType)
+        put("icon_hint", nodeType)
+    }
+
+    private class SymbolTreeNode(val name: String, val fullName: String, val nodeType: String) {
+        val children = LinkedHashMap<String, SymbolTreeNode>()
+
+        fun toJson(): JsonObject = buildJsonObject {
+            put("name", name)
+            put("full_name", fullName)
+            put("node_type", nodeType)
+            if (children.isNotEmpty()) {
+                putJsonArray("children") { children.values.sortedBy { it.name }.forEach { add(it.toJson()) } }
+            }
+        }
+    }
+
     // ── Classes ──────────────────────────────────────────────
 
     fun listClasses(filter: String? = null, limit: Int = 50, offset: Int = 0): PaginatedClasses = read {

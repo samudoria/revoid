@@ -43,6 +43,59 @@ fun registerTools(server: Server, engine: JadxEngine) {
         wrapFast { json.encodeToString(engine.loadStatus()) }
     }
 
+    // ── GUI compatibility tools ──
+    val pathDesc = "App path (ignored; the currently loaded app is used)"
+    server.addTool("revoid_get_symbol_tree",
+        "GUI compatibility: package/class tree for the loaded app. Returns {status: initializing} while loading.",
+        mkSchema {
+            prop("path", "string", pathDesc)
+            prop("restart_failed", "boolean", "Reload if the previous load failed (default false)")
+        }
+    ) { _ ->
+        wrap { json.encodeToString(JsonObject.serializer(), engine.getSymbolTree()) }
+    }
+
+    server.addTool("revoid_get_symbol_source",
+        "GUI compatibility: full decompiled class source, or a method when symbol_name is 'pkg.Class#method'. Supports max_chars/offset paging.",
+        mkSchema {
+            required("symbol_name")
+            prop("path", "string", pathDesc)
+            prop("symbol_name", "string", "Class name or 'pkg.Class#method'")
+            prop("max_chars", "integer", "Max characters to return (default 20000; 0 = unlimited)")
+            prop("offset", "integer", "Character offset into the output (default 0)")
+        }
+    ) { req ->
+        val a = req.arguments
+        wrap {
+            json.encodeToString(
+                JsonObject.serializer(),
+                engine.getSymbolSource(
+                    a.str("symbol_name"),
+                    a.optInt("max_chars") ?: JadxEngine.DEFAULT_METHOD_MAX_CHARS,
+                    a.optInt("offset") ?: 0,
+                ),
+            )
+        }
+    }
+
+    server.addTool("revoid_search_symbols",
+        "GUI compatibility: search classes, methods and fields in one call. Returns valid selectors for revoid_get_symbol_source.",
+        mkSchema {
+            required("query")
+            prop("path", "string", pathDesc)
+            prop("query", "string", "Search query")
+            prop("limit", "integer", "Max combined results (default 50)")
+        }
+    ) { req ->
+        val a = req.arguments
+        wrap {
+            json.encodeToString(
+                JsonObject.serializer(),
+                engine.searchSymbols(a.str("query"), a.optInt("limit") ?: 50),
+            )
+        }
+    }
+
     server.addTool("list_classes",
         "List decompiled classes (inner classes included) with raw names. Optionally filter by package prefix.",
         mkSchema { prop("filter", "string", "Optional package prefix filter"); paging() }

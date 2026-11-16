@@ -112,6 +112,9 @@ Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/o
 | `revoid_load_app` | Start loading an APK/DEX file in the background. **Must be called first.** Returns immediately. |
 | `load_status` | Load lifecycle: `state` = `idle`/`loading`/`ready`/`error`, plus `progress` (0..1), `elapsed_s`, and (when ready) `apkId`/`classCount`. Poll after `revoid_load_app`. |
 | `get_server_info` | Revoid/jadx versions, capabilities, and current `loadState`/`loadedApk`. |
+| `revoid_get_symbol_tree` | GUI compatibility: package/class tree for the loaded app; returns `{status: initializing}` while loading. |
+| `revoid_get_symbol_source` | GUI compatibility: full class source, or one method via `pkg.Class#method`; supports `max_chars`/`offset`. |
+| `revoid_search_symbols` | GUI compatibility: combined class/method/field search returning valid selectors. |
 | `list_classes` | List all decompiled classes, optionally filtered by package prefix. |
 | `get_class_imports` | List the import statements (fully-qualified type names) from a class's source. |
 | `list_methods` | List methods in a class with signatures and access modifiers. `summary=true` returns only signature + id; paginated. |
