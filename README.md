@@ -114,15 +114,15 @@ Add a local MCP server to `opencode.json` (project root or `~/.config/opencode/o
 | `get_server_info` | Revoid/jadx versions, capabilities, and current `loadState`/`loadedApk`. |
 | `list_classes` | List all decompiled classes, optionally filtered by package prefix. |
 | `get_class_imports` | List the import statements (fully-qualified type names) from a class's source. |
-| `list_methods` | List all methods in a class with signatures and access modifiers. |
-| `get_method_source` | Get the decompiled source code of a specific method. |
+| `list_methods` | List methods in a class with signatures and access modifiers. `summary=true` returns only signature + id; paginated. |
+| `get_method_source` | Get a method's decompiled source. Accepts a class simple name, method shortId or full signature; `max_chars` (default 20000, `0` = unlimited) and `offset` page long bodies. |
 | `get_fields_of_class` | List all fields in a class with their types and access modifiers. |
 | `get_smali_method_signatures` | List the smali method signatures (access flags + name + descriptor) of a class. |
-| `get_class_summary` | Get a structured summary (superclass, interfaces, component type). |
-| `search_classes` | Preferred search: classes by name using substring or regex. Pass a concrete query. |
+| `get_class_summary` | Get a structured summary (superclass, interfaces, component type). A unique simple/fuzzy class name is auto-resolved. |
+| `search_classes` | Preferred search: classes by name using substring or regex. Capped and paginated; broad queries return `truncated: true`. |
 | `search_classes_by_keyword` | Index-backed keyword search over class/member names and dex strings; bounded and paginated. |
 | `search_method_by_name` | Index-backed method name search, paginated. |
-| `search_strings` | Streaming search over the prebuilt dex string index; bounded and paginated. |
+| `search_strings` | Streaming search over the prebuilt dex string index; capped and paginated (`truncated: true` on broad queries). |
 | `get_callers` | Methods that call a target (exact by default; `exact=false` for substring). Paginated. |
 | `get_callees` | Get all methods called by a given method. |
 | `get_server_info` | Revoid/jadx versions and capabilities (`editing: true`). |
@@ -164,7 +164,7 @@ The server uses STDIO for MCP JSON-RPC communication. Therefore, all standard ou
 
 ## Names and editing
 
-Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#shortId` (e.g. `a.b.C#m(Ljava/lang/String;I)V`). Lookups are exact and accept the raw name, the current display name, or any earlier display name from this session; a miss lists candidates.
+Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#shortId` (e.g. `a.b.C#m(Ljava/lang/String;I)V`). Lookups accept the raw name, the current display name, or any earlier display name from this session. Read-only analysis tools (`get_class_summary`, `get_method_source`, `list_methods` summary) also auto-resolve a unique simple/fuzzy class or method name; ambiguous names return a candidate list.
 
 ## Environment variables
 
@@ -181,6 +181,7 @@ Classes are identified by raw name (`a.b.Outer$Inner`) and methods by `rawClass#
 | `REVOID_KEYWORD_INDEX_MAX_ENTRIES` | Cap on keyword-index entries (default `500000`) to bound memory |
 | `REVOID_PARSE_RESOURCES` | Set `1` to parse resources at load. Required for `get_resource_strings`; otherwise it returns `available: false` with a clear message |
 | `REVOID_MAX_CONCURRENT_TOOLS` | Maximum tool handlers running at once (default `4`). Extra calls wait instead of exhausting server threads |
+| `REVOID_SSE_HEARTBEAT_S` | SSE keep-alive period in seconds (default `15`; `0` disables). Prevents idle proxies/clients from closing the session during long tools |
 
 
 ## Releases

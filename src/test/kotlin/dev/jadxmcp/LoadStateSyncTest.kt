@@ -71,6 +71,21 @@ class LoadStateSyncTest {
     }
 
     @Test
+    fun `same apk via relative and absolute path is idempotent`() {
+        val engine = newEngine()
+        try {
+            val first = engine.loadApkAsync(sampleJar.path)
+            assertEquals("loaded", first["status"])
+            val second = engine.loadApkAsync(sampleJar.absolutePath)
+            assertEquals("loaded", second["status"])
+            assertEquals(sampleJar.absoluteFile.normalize().path, engine.currentApkPath)
+            assertTrue(engine.listClasses(limit = 1000).items.isNotEmpty())
+        } finally {
+            engine.close()
+        }
+    }
+
+    @Test
     fun `reloading a different apk tears down the old one and stays usable`() {
         val engine = newEngine()
         val other = Files.createTempFile("revoid-other", ".jar").toFile()

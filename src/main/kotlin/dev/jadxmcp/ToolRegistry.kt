@@ -58,22 +58,44 @@ fun registerTools(server: Server, engine: JadxEngine) {
     }
 
     server.addTool("list_methods",
-        "List methods in a class with full-type signatures and shortIds.",
-        mkSchema { required("class_name"); prop("class_name", "string", "Class name (raw or display)"); paging() }
+        "List methods in a class with full-type signatures and shortIds. Set summary=true for a compact signature+id list.",
+        mkSchema {
+            required("class_name"); prop("class_name", "string", "Class name (raw or display)")
+            prop("summary", "boolean", "Return only signature + id per method (default false)")
+            paging()
+        }
     ) { req ->
-        wrap { json.encodeToString(engine.listMethods(req.arguments.str("class_name"), req.arguments.lim(), req.arguments.off())) }
+        wrap {
+            val a = req.arguments
+            if (a.optBool("summary") == true) {
+                json.encodeToString(engine.listMethodsSummary(a.str("class_name"), a.lim(), a.off()))
+            } else {
+                json.encodeToString(engine.listMethods(a.str("class_name"), a.lim(), a.off()))
+            }
+        }
     }
 
     server.addTool("get_method_source",
-        "Get decompiled source of a method. Overloads: pass method_id (shortId) to select one, otherwise all overloads of the name are returned.",
+        "Get decompiled source of a method. Overloads: pass method_id (shortId) to select one, otherwise all overloads of the name are returned. Long bodies can be paged with max_chars/offset.",
         mkSchema {
             required("class_name", "method_name")
-            prop("class_name", "string", "Class name (raw or display)")
-            prop("method_name", "string", "Method name (raw, display or earlier name)")
+            prop("class_name", "string", "Class name (raw, display or simple name)")
+            prop("method_name", "string", "Method name, shortId, or full signature")
             prop("method_id", "string", "Optional shortId, e.g. m(Ljava/lang/String;I)V")
+            prop("max_chars", "integer", "Max characters to return (default 20000; 0 = unlimited)")
+            prop("offset", "integer", "Character offset into the output (default 0)")
         }
     ) { req ->
-        wrap { engine.getMethodSource(req.arguments.str("class_name"), req.arguments.str("method_name"), req.arguments.optStr("method_id")) }
+        wrap {
+            val a = req.arguments
+            engine.getMethodSource(
+                a.str("class_name"),
+                a.str("method_name"),
+                a.optStr("method_id"),
+                a.optInt("max_chars") ?: JadxEngine.DEFAULT_METHOD_MAX_CHARS,
+                a.optInt("offset") ?: 0,
+            )
+        }
     }
 
     server.addTool("get_class_summary",

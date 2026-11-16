@@ -52,9 +52,10 @@ class JadxEngineTest {
     }
 
     @Test
-    fun testExactClassLookup() {
-        val e = assertThrows(IllegalArgumentException::class.java) { engine.getClassSummary("Crypto") }
-        assertTrue(e.message!!.contains(crypto), "miss should list candidates")
+    fun testLenientClassLookup() {
+        assertEquals(crypto, engine.getClassSummary("Crypto").rawName)
+        val e = assertThrows(IllegalArgumentException::class.java) { engine.getClassSummary("DefinitelyNotAClass") }
+        assertTrue(e.message!!.contains("not found"), e.message)
         assertEquals(crypto, engine.resolveNode("Crypto", fuzzy = true).declClass)
     }
 
@@ -122,6 +123,8 @@ class JadxEngineTest {
     fun testManifestParsing() {
         assertEquals("com.example.testapp.MainActivity", engine.getMainActivityClass())
         assertEquals("com.example.testapp.MainActivity", engine.getManifestComponent("activity").single().name)
+        assertSame(engine.getManifestComponent("activity"), engine.getManifestComponent("activity"), "manifest results are memoized")
+        assertSame(engine.getManifestPermissions(), engine.getManifestPermissions(), "permissions are memoized")
         assertTrue(engine.getMainApplicationClassesNames().contains("com.example.testapp.MainActivity"))
     }
 
@@ -140,6 +143,20 @@ class JadxEngineTest {
         assertTrue(engine.listMethods(crypto).items.any { it.name == "decrypt" && it.shortId.startsWith("decrypt(") })
         assertTrue(engine.getMethodSource(crypto, "decrypt").contains("public static String decrypt(String str)"))
         assertTrue(engine.getMethodSource(crypto, "decrypt", "decrypt(Ljava/lang/String;)Ljava/lang/String;").contains("decrypt"))
+        // Simple class name and fuzzy method name both resolve.
+        assertTrue(engine.getMethodSource("Crypto", "decryp").contains("decrypt"))
+        // Compact list mode drops the verbose MethodInfo fields.
+        val summary = engine.listMethodsSummary("Crypto")
+        assertTrue(summary.items.any { it.signature.contains("decrypt") && it.id.startsWith("$crypto#") })
+        // Long method bodies are windowed and resumable.
+        val full = engine.getMethodSource(crypto, "decrypt")
+        val truncated = engine.getMethodSource(crypto, "decrypt", maxChars = 40)
+        assertTrue(truncated.contains("[truncated"), truncated)
+        val resumed = engine.getMethodSource(crypto, "decrypt", maxChars = 0, offset = 10)
+        assertTrue(resumed.startsWith("// [offset 10 of ${full.length} chars]"), resumed)
+        // Smali signatures are deduplicated.
+        val smali = engine.getSmaliMethodSignatures("com.example.testapp.MainActivity")
+        assertEquals(smali.size, smali.distinct().size)
     }
 
     @Test

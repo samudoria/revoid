@@ -6,10 +6,13 @@ import io.ktor.server.engine.connector
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.engine.sslConnector
 import io.ktor.server.netty.Netty
+import io.ktor.server.sse.ServerSSESession
+import io.ktor.server.sse.heartbeat
 import io.modelcontextprotocol.kotlin.sdk.server.mcp
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.security.KeyStore
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * HTTP/SSE entrypoint. Serves the MCP SSE transport (GET+POST at the base URL).
@@ -50,9 +53,15 @@ private fun Application.mcpModule(engine: JadxEngine) {
     // DNS-rebinding protection defaults to a localhost-only Host allowlist, which rejects a
     // network-facing server; keep it off unless REVOID_ALLOWED_HOSTS pins the hosts to accept.
     val hosts = System.getenv("REVOID_ALLOWED_HOSTS")?.split(",")?.map(String::trim)?.filter(String::isNotEmpty)
+    // Periodic SSE comments keep idle connections alive through proxies and stop clients from
+    // tearing the session down while a long analysis tool is running.
+    val heartbeatSeconds = System.getenv("REVOID_SSE_HEARTBEAT_S")?.toLongOrNull() ?: 15L
+    fun installHeartbeat(session: ServerSSESession) {
+        if (heartbeatSeconds > 0) session.heartbeat { period = heartbeatSeconds.seconds }
+    }
     if (hosts.isNullOrEmpty()) {
-        mcp(false) { newServer(engine) }
+        mcp(false) { installHeartbeat(this); newServer(engine) }
     } else {
-        mcp(true, hosts) { newServer(engine) }
+        mcp(true, hosts) { installHeartbeat(this); newServer(engine) }
     }
 }

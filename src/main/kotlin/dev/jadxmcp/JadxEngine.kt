@@ -121,6 +121,10 @@ class JadxEngine(
 
     // Decoded AndroidManifest.xml text; decoded once on first manifest access (primed at load).
     @Volatile private var manifestCache: String? = null
+    // Parsed manifest results are memoized per load: repeated manifest tool calls are extremely common.
+    private val manifestComponentCache = ConcurrentHashMap<String, List<ManifestComponent>>()
+    @Volatile private var manifestPermissionsCache: List<String>? = null
+    @Volatile private var manifestExportedCache: List<ManifestComponent>? = null
     // Main activity resolved once at load so the status tool never re-parses the manifest.
     @Volatile private var mainActivityCache: String? = null
 
@@ -148,14 +152,22 @@ class JadxEngine(
     */
     @Synchronized
     fun loadApkAsync(path: String): Map<String, String> {
-        require(File(path).isFile) { "File not found: $path" }
+        val file = File(path)
+        require(file.isFile) { "File not found: $path" }
+        // Normalize so "app.apk", "./app.apk" and an absolute path all count as the same load.
+        val normalizedPath = file.absoluteFile.normalize().path
+        val timeoutMs = (System.getenv("REVOID_LOAD_TIMEOUT_S")?.toLongOrNull() ?: 900L) * 1000
+
+        // A previous call may have timed out while its daemon worker is still loading. Join it rather
+        // than starting a second loader against the same engine (which would race on teardown).
+        loader?.takeIf { it !== Thread.currentThread() && it.isAlive }?.join(timeoutMs)
 
         // Idempotent: this APK is genuinely loaded → no-op, report ready. The decompiler check is
         // essential: a stale READY (decompiler torn down without resetting state) must not skip a reload.
         // The transition to LOADING is taken under the lock so it can never interrupt a read that is
         // already executing on another thread.
         val alreadyLoaded = write {
-            if (loadState == LoadState.READY && currentApkPath == path && decompiler != null) {
+            if (loadState == LoadState.READY && currentApkPath == normalizedPath && decompiler != null) {
                 true
             } else {
                 // A different APK is already loaded → switch to the new one (fall through to load it).
@@ -163,6 +175,7 @@ class JadxEngine(
                 loadState = LoadState.LOADING
                 loadProgress = 0.0
                 loadStartedAt = System.currentTimeMillis()
+                loadingPath = normalizedPath
                 false
             }
         }
@@ -175,8 +188,8 @@ class JadxEngine(
         val worker = Thread {
             write {
                 try {
-                    doLoadApk(path)
-                    currentApkPath = path
+                    doLoadApk(normalizedPath)
+                    currentApkPath = normalizedPath
                     loadState = LoadState.READY
                 } catch (e: Throwable) {
                     log.error("Load failed", e)
@@ -184,6 +197,7 @@ class JadxEngine(
                     loadState = LoadState.ERROR
                 } finally {
                     loadFinishedAt = System.currentTimeMillis()
+                    loadingPath = null
                     loader = null
                 }
             }
@@ -193,7 +207,6 @@ class JadxEngine(
         worker.start()
 
         // Block until the load finishes or the timeout elapses.
-        val timeoutMs = (System.getenv("REVOID_LOAD_TIMEOUT_S")?.toLongOrNull() ?: 900L) * 1000
         worker.join(timeoutMs)
 
         if (worker.isAlive) {
@@ -384,7 +397,7 @@ class JadxEngine(
 
     fun getClassSummary(className: String): ClassSummary = read {
         requireLoaded()
-        val classNode = findClassNode(className)
+        val classNode = findClassNodeLenient(className)
         return ClassSummary(
             name = classNode.fullName,
             rawName = classNode.rawName,
@@ -403,8 +416,23 @@ class JadxEngine(
     fun searchClasses(query: String, isRegex: Boolean = false, limit: Int = 50, offset: Int = 0): PaginatedClasses = read {
         requireLoaded()
         val match = matcher(query, isRegex)
-        val all = classIndex.values.filter { match(it.fullName) || match(it.rawName) }.sortedBy { it.fullName }
-        return pageClasses(all, limit, offset)
+        val deadline = System.currentTimeMillis() + toolTimeoutMs()
+        val maxResults = maxSearchResults()
+        val all = ArrayList<ClassNode>()
+        var truncated = false
+        var scanned = 0
+        for (c in classIndex.values) {
+            if ((scanned++ and 0x3FF) == 0 &&
+                (System.currentTimeMillis() > deadline || Thread.currentThread().isInterrupted)) {
+                truncated = true
+                break
+            }
+            if (!match(c.fullName) && !match(c.rawName)) continue
+            all.add(c)
+            if (all.size >= maxResults) { truncated = true; break }
+        }
+        all.sortBy { it.fullName }
+        return pageClasses(all, limit, offset, truncated)
     }
 
     fun searchClassesByKeyword(keyword: String, limit: Int = 50, offset: Int = 0): PaginatedClasses = read {
@@ -442,24 +470,39 @@ class JadxEngine(
         return PaginatedMethods(methods.page(limit, offset), methods.size, limit, offset)
     }
 
-    fun getMethodSource(className: String, methodName: String, methodId: String? = null): String = read {
+    /** Compact method list: signature + id only, for token-sensitive discovery. */
+    fun listMethodsSummary(className: String, limit: Int = 50, offset: Int = 0): PaginatedMethodRefs = read {
         requireLoaded()
-        val cls = findClass(className)
+        val refs = findClassNodeLenient(className).methods
+            .map { MethodRef(getMethodSignature(javaMethodOf(it)), mid(it)) }
+            .sortedBy { it.signature }
+        return PaginatedMethodRefs(refs.page(limit, offset), refs.size, limit, offset)
+    }
+
+    fun getMethodSource(
+        className: String,
+        methodName: String,
+        methodId: String? = null,
+        maxChars: Int = DEFAULT_METHOD_MAX_CHARS,
+        offset: Int = 0,
+    ): String = read {
+        requireLoaded()
+        val cls = findClassLenient(className)
         val source = getCachedSource(cls)
 
         val matching = if (!methodId.isNullOrBlank()) {
             listOf(cls.searchMethodByShortId(methodId)
                 ?: throw IllegalArgumentException("Method id '$methodId' not found in '${cls.fullName}'. Ids: ${cls.methods.joinToString { shortId(it) }}"))
         } else {
-            cls.methods.filter { nameMatches(it, methodName) }
+            findMethodsLenient(cls, methodName)
         }
-        if (matching.isEmpty()) throw IllegalArgumentException("Method '$methodName' not found in class '$className'")
 
         val results = matching.mapNotNull { m ->
             extractMethodSource(source, m)?.let { "// Signature: ${getMethodSignature(m)}  id: ${shortId(m)}\n$it" }
         }
-        return if (results.isEmpty()) "// Could not extract method body for '$methodName'. Full class source:\n$source"
+        val text = if (results.isEmpty()) "// Could not extract method body for '$methodName'. Full class source:\n$source"
         else results.joinToString("\n\n")
+        return window(text, offset, maxChars)
     }
 
     fun getFieldsOfClass(className: String): List<FieldInfo> = read {
@@ -488,6 +531,8 @@ class JadxEngine(
         return smali.lines().map { it.trim() }
             .filter { it.startsWith(".method ") }
             .map { it.removePrefix(".method ") }
+            .filter { it.isNotBlank() }
+            .distinct()
     }
 
     /** Import lines from the class's decompiled source (fully-qualified; `static` kept, `;` stripped). */
@@ -632,9 +677,10 @@ class JadxEngine(
 
     /** Components of one manifest tag (`activity`, `activity-alias`, `service`, ...); names are resolved to full class names. */
     fun getManifestComponent(componentType: String): List<ManifestComponent> = read {
+        manifestComponentCache[componentType]?.let { return it }
         val root = manifestRoot()
         val pkg = root.getAttribute("package")
-        return elements(root, componentType).map { e ->
+        val parsed = elements(root, componentType).map { e ->
             ManifestComponent(
                 type = componentType,
                 name = resolveComponentName(pkg, e.getAttribute("android:name").ifEmpty { "Unknown" }),
@@ -642,6 +688,8 @@ class JadxEngine(
                 rawXml = serialize(e),
             )
         }
+        manifestComponentCache[componentType] = parsed
+        return parsed
     }
 
     fun getManifestActivities(): List<ManifestComponent> = read {
@@ -649,16 +697,22 @@ class JadxEngine(
     }
 
     fun getManifestPermissions(): List<String> = read {
+        manifestPermissionsCache?.let { return it }
         val root = manifestRoot()
-        return listOf("uses-permission", "uses-permission-sdk-23")
+        val parsed = listOf("uses-permission", "uses-permission-sdk-23")
             .flatMap { tag -> elements(root, tag) }
             .map { it.getAttribute("android:name") }
             .filter { it.isNotEmpty() }
+        manifestPermissionsCache = parsed
+        return parsed
     }
 
     fun getManifestExportedComponents(): List<ManifestComponent> = read {
-        (getManifestActivities() + listOf("service", "receiver", "provider").flatMap { getManifestComponent(it) })
+        manifestExportedCache?.let { return it }
+        val parsed = (getManifestActivities() + listOf("service", "receiver", "provider").flatMap { getManifestComponent(it) })
             .filter { it.exported == true }
+        manifestExportedCache = parsed
+        return parsed
     }
 
     fun getMainActivityClass(): String = read {
@@ -1230,6 +1284,62 @@ class JadxEngine(
     private fun findClass(className: String, fuzzy: Boolean = false): JavaClass =
         javaClassOf(findClassNode(className, fuzzy))
 
+    /**
+     * Lenient lookup for read-only analysis tools: exact first, then a unique simple-name/suffix
+     * candidate is auto-resolved. Ambiguous names still fail with a candidate list.
+     */
+    private fun findClassNodeLenient(className: String): ClassNode {
+        try {
+            return findClassNode(className)
+        } catch (e: IllegalArgumentException) {
+            val needle = className.replace('$', '.')
+            val candidates = classIndex.values.filter {
+                it.fullName.endsWith(".$needle") || it.rawName.endsWith(".$needle") ||
+                    it.fullName.contains(needle, true) || it.rawName.contains(className, true)
+            }.sortedBy { it.fullName }
+            val simple = candidates.filter {
+                it.fullName.substringAfterLast('.').equals(needle, true) ||
+                    it.rawName.substringAfterLast('.').equals(needle, true)
+            }
+            if (simple.size == 1) return simple[0]
+            if (candidates.size == 1) return candidates[0]
+            val hint = if (candidates.isEmpty()) "No similar classes." else
+                "Candidates: " + candidates.take(10).joinToString { "${it.fullName} (raw ${it.rawName})" } +
+                    if (candidates.size > 10) ", ... (${candidates.size} total)" else ""
+            throw IllegalArgumentException("Class '$className' not found. $hint")
+        }
+    }
+
+    private fun findClassLenient(className: String): JavaClass =
+        javaClassOf(findClassNodeLenient(className))
+
+    /** Exact name/signature/shortId first, then a unique substring match; otherwise list candidates. */
+    private fun findMethodsLenient(cls: JavaClass, methodName: String): List<JavaMethod> {
+        val exact = cls.methods.filter { nameMatches(it, methodName) }
+        if (exact.isNotEmpty()) return exact
+
+        runCatching { resolveMethodExact(methodName) }.getOrNull()
+            ?.takeIf { it.declaringClass.rawName == cls.rawName }
+            ?.let { return listOf(it) }
+        cls.searchMethodByShortId(methodName)?.let { return listOf(it) }
+
+        val needle = methodName.substringBefore('(').lowercase()
+        val fuzzy = cls.methods.filter {
+            it.name.lowercase().contains(needle) ||
+                it.methodNode.methodInfo.name.lowercase().contains(needle) ||
+                shortId(it).lowercase().contains(methodName.lowercase())
+        }
+        if (fuzzy.size == 1) return fuzzy
+        val available = cls.methods.joinToString { "${getMethodSignature(it)} [${shortId(it)}]" }
+        if (fuzzy.isEmpty()) {
+            throw IllegalArgumentException("Method '$methodName' not found in '${cls.fullName}'. Available methods: $available")
+        }
+        throw IllegalArgumentException(
+            "Ambiguous method '$methodName' in '${cls.fullName}'. Candidates: " +
+                fuzzy.joinToString { "${getMethodSignature(it)} [${shortId(it)}]" }
+        )
+    }
+
     private fun nameMatches(m: JavaMethod, name: String) =
         memberNameMatches(mid(m), m.name, m.methodNode.methodInfo.name, name)
 
@@ -1431,6 +1541,9 @@ class JadxEngine(
         keywordIndex = null
         keywordIndexTruncated = false
         manifestCache = null
+        manifestComponentCache.clear()
+        manifestPermissionsCache = null
+        manifestExportedCache = null
         mainActivityCache = null
     }
 
@@ -1481,6 +1594,26 @@ class JadxEngine(
         PaginatedClasses(all.page(limit, offset).map { ClassRef(it.fullName, it.rawName) }, all.size, limit, offset, truncated)
 
     private fun <T> List<T>.page(limit: Int, offset: Int) = drop(offset.coerceAtLeast(0)).take(limit.coerceAtLeast(0))
+
+    /** Character window with newline-aware truncation and a resumable offset hint. */
+    private fun window(text: String, offset: Int, maxChars: Int): String {
+        val start = offset.coerceAtLeast(0)
+        if (start >= text.length) {
+            return if (text.isEmpty()) text
+            else "// [offset $start is past the end of the output (${text.length} chars)]"
+        }
+        val end = if (maxChars <= 0) text.length else (start + maxChars).coerceAtMost(text.length)
+        var cut = end
+        if (end < text.length) {
+            val nl = text.lastIndexOf('\n', end - 1)
+            if (nl > start) cut = nl
+        }
+        val prefix = if (start > 0) "// [offset $start of ${text.length} chars]\n" else ""
+        val suffix = if (cut < text.length) {
+            "\n// [truncated: showing chars $start-$cut of ${text.length}; call again with offset=$cut]"
+        } else ""
+        return prefix + text.substring(start, cut) + suffix
+    }
 
     private fun matcher(query: String, isRegex: Boolean): (String) -> Boolean =
         if (isRegex) Regex(query, RegexOption.IGNORE_CASE).let { r -> { s: String -> r.containsMatchIn(s) } }
@@ -1556,6 +1689,8 @@ class JadxEngine(
 
     companion object {
         const val DEFAULT_MAX_CHARS = 60_000
+        /** Default cap for a single method body; pass max_chars=0 to read the whole thing. */
+        const val DEFAULT_METHOD_MAX_CHARS = 20_000
 
         /** Hard ceiling for scans that can touch every class; keeps a tool call under the MCP timeout. */
         private fun toolTimeoutMs(): Long =
