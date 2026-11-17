@@ -6,6 +6,7 @@ import jadx.api.JavaClass
 import jadx.api.JavaField
 import jadx.api.JavaMethod
 import jadx.api.JavaNode
+import jadx.api.ResourceFile
 import jadx.api.data.CodeRefType
 import jadx.api.data.CommentStyle
 import jadx.api.data.ICodeComment
@@ -643,14 +644,22 @@ class JadxEngine(
     ): String = read {
         requireLoaded()
         val cls = findClassLenient(className)
-        val source = getCachedSource(cls)
 
+        var ownerCls = cls
         val matching = if (!methodId.isNullOrBlank()) {
             listOf(cls.searchMethodByShortId(methodId)
                 ?: throw IllegalArgumentException("Method id '$methodId' not found in '${cls.fullName}'. Ids: ${cls.methods.joinToString { shortId(it) }}"))
         } else {
-            findMethodsLenient(cls, methodName)
+            val found = findMethodOwner(cls, methodName)
+            if (found != null) {
+                ownerCls = found.first
+                found.second
+            } else {
+                // Re-run the direct lookup so the caller gets the detailed candidate list.
+                findMethodsLenient(cls, methodName)
+            }
         }
+        val source = getCachedSource(ownerCls)
 
         val results = matching.mapNotNull { m ->
             extractMethodSource(source, m)?.let { "// Signature: ${getMethodSignature(m)}  id: ${shortId(m)}\n$it" }
@@ -682,7 +691,7 @@ class JadxEngine(
     /** Smali `.method` declaration lines (access flags + name + descriptor) for every method in the class. */
     fun getSmaliMethodSignatures(className: String): List<String> = read {
         requireLoaded()
-        val smali = findClass(className).smali ?: return emptyList()
+        val smali = findClassLenient(className).smali ?: return emptyList()
         return smali.lines().map { it.trim() }
             .filter { it.startsWith(".method ") }
             .map { it.removePrefix(".method ") }
@@ -770,8 +779,19 @@ class JadxEngine(
         requireLoaded()
         val res = decompiler?.resources?.find { it.originalName == name }
             ?: throw IllegalArgumentException("Resource file '$name' not found.")
-        return res.loadContent().text?.codeStr ?: "// Resource could not be decoded as text."
+        resourceText(res) ?: "// Resource '$name' could not be decoded as text (binary or unsupported resource type)."
     }
+
+    /**
+     * Decode a resource's text, tolerating jadx's `ResourceFile`/`ICodeInfo` cast bug on
+     * certain entries (thrown as a ClassCastException from `loadContent()`).
+     */
+    private fun resourceText(res: ResourceFile): String? =
+        try {
+            res.loadContent().text?.codeStr
+        } catch (e: ClassCastException) {
+            null
+        }
 
     fun getResourceStrings(limit: Int = 50, offset: Int = 0): PaginatedResourceStrings = read {
         requireLoaded()
@@ -789,7 +809,7 @@ class JadxEngine(
                 available = false,
                 message = "res/values/strings.xml was not found in this APK.",
             )
-        val xml = res.loadContent().text?.codeStr ?: return PaginatedResourceStrings(emptyList(), 0, limit, offset)
+        val xml = resourceText(res) ?: return PaginatedResourceStrings(emptyList(), 0, limit, offset)
         val pattern = Regex("<string\\s+name=\"([^\"]+)\"[^>]*>(.*?)</string>", RegexOption.DOT_MATCHES_ALL)
         val results = pattern.findAll(xml).map { ResourceString(it.groupValues[1], it.groupValues[2]) }.toList()
         return PaginatedResourceStrings(results.page(limit, offset), results.size, limit, offset)
@@ -803,7 +823,7 @@ class JadxEngine(
         manifestCache?.let { return it }
         val res = decompiler?.resources?.find { it.originalName == "AndroidManifest.xml" }
             ?: throw IllegalArgumentException("AndroidManifest.xml not found")
-        return (res.loadContent().text?.codeStr ?: "// Failed to decode AndroidManifest.xml").also { manifestCache = it }
+        return (resourceText(res) ?: "// Failed to decode AndroidManifest.xml").also { manifestCache = it }
     }
 
     private fun manifestRoot(): Element {
@@ -1419,13 +1439,14 @@ class JadxEngine(
 
     /** Exact raw lookup by raw name, current display name, or earlier display name. Fuzzy only if asked. */
     private fun findClassNode(className: String, fuzzy: Boolean = false): ClassNode {
-        for (n in listOf(className, className.replace('$', '.'))) {
+        val normalized = normalizeClassName(className)
+        for (n in listOf(normalized, normalized.replace('$', '.'))) {
             classIndex[n]?.let { return it }
             (displayIndex[n] ?: oldClassNames[n])?.let { return classIndex.getValue(it) }
         }
-        val needle = className.replace('$', '.')
+        val needle = normalized.replace('$', '.')
         val candidates = classIndex.values.filter {
-            it.fullName.endsWith(".$needle") || it.fullName.contains(needle, true) || it.rawName.contains(className, true)
+            it.fullName.endsWith(".$needle") || it.fullName.contains(needle, true) || it.rawName.contains(normalized, true)
         }.sortedBy { it.fullName }
         if (fuzzy && candidates.isNotEmpty()) {
             return candidates.firstOrNull { it.fullName.endsWith(".$needle") } ?: candidates.first()
@@ -1436,6 +1457,17 @@ class JadxEngine(
         throw IllegalArgumentException("Class '$className' not found (exact match required). $hint")
     }
 
+    /**
+     * Accept JVM descriptors (`Lpkg/Cls;`) and slashed names; return a dotted class name.
+     * The model frequently copies descriptors out of smali output, which would otherwise
+     * miss the index and produce a spurious "class not found".
+     */
+    private fun normalizeClassName(name: String): String {
+        var n = name.trim()
+        if (n.length > 2 && n.startsWith("L") && n.endsWith(";")) n = n.substring(1, n.length - 1)
+        return n.replace('/', '.')
+    }
+
     private fun findClass(className: String, fuzzy: Boolean = false): JavaClass =
         javaClassOf(findClassNode(className, fuzzy))
 
@@ -1444,13 +1476,14 @@ class JadxEngine(
      * candidate is auto-resolved. Ambiguous names still fail with a candidate list.
      */
     private fun findClassNodeLenient(className: String): ClassNode {
+        val normalized = normalizeClassName(className)
         try {
-            return findClassNode(className)
+            return findClassNode(normalized)
         } catch (e: IllegalArgumentException) {
-            val needle = className.replace('$', '.')
+            val needle = normalized.replace('$', '.')
             val candidates = classIndex.values.filter {
                 it.fullName.endsWith(".$needle") || it.rawName.endsWith(".$needle") ||
-                    it.fullName.contains(needle, true) || it.rawName.contains(className, true)
+                    it.fullName.contains(needle, true) || it.rawName.contains(normalized, true)
             }.sortedBy { it.fullName }
             val simple = candidates.filter {
                 it.fullName.substringAfterLast('.').equals(needle, true) ||
@@ -1487,7 +1520,10 @@ class JadxEngine(
         if (fuzzy.size == 1) return fuzzy
         val available = cls.methods.joinToString { "${getMethodSignature(it)} [${shortId(it)}]" }
         if (fuzzy.isEmpty()) {
-            throw IllegalArgumentException("Method '$methodName' not found in '${cls.fullName}'. Available methods: $available")
+            val superName = cls.classNode.superClass?.getObject()
+            val inherited = if (superName != null)
+                " It may be inherited from '$superName' (framework classes are not decompiled)." else ""
+            throw IllegalArgumentException("Method '$methodName' not found in '${cls.fullName}'.$inherited Available methods: $available")
         }
         throw IllegalArgumentException(
             "Ambiguous method '$methodName' in '${cls.fullName}'. Candidates: " +
@@ -1500,6 +1536,23 @@ class JadxEngine(
 
     private fun memberNameMatches(id: String, display: String, raw: String, name: String) =
         name == display || name == raw || oldMemberNames[id]?.contains(name) == true
+
+    /**
+     * Resolve [methodName] on [cls], then on its superclasses (e.g. `onCreate` on an
+     * Activity subclass). Returns the class that actually declares the methods so the
+     * caller decompiles the right source.
+     */
+    private fun findMethodOwner(cls: JavaClass, methodName: String): Pair<JavaClass, List<JavaMethod>>? {
+        runCatching { findMethodsLenient(cls, methodName) }.getOrNull()?.let { return cls to it }
+        val seen = HashSet<String>()
+        var cur: ClassNode? = cls.classNode.superClass?.getObject()?.let { classIndex[it] }
+        while (cur != null && seen.add(cur.rawName)) {
+            val owner = javaClassOf(cur)
+            runCatching { findMethodsLenient(owner, methodName) }.getOrNull()?.let { return owner to it }
+            cur = cur.superClass?.getObject()?.let { classIndex[it] }
+        }
+        return null
+    }
 
     /**
      * Accepts `rawDeclClass#shortId`, or a display signature `Cls.name(types):ret` (return type optional),
